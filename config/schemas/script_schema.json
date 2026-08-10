@@ -1,0 +1,149 @@
+{
+  "$defs": {
+    "Category": {
+      "enum": [
+        "dsa",
+        "design_pattern"
+      ],
+      "title": "Category",
+      "type": "string"
+    },
+    "Difficulty": {
+      "enum": [
+        "beginner",
+        "intermediate",
+        "advanced"
+      ],
+      "title": "Difficulty",
+      "type": "string"
+    },
+    "Meta": {
+      "additionalProperties": false,
+      "properties": {
+        "topic": {
+          "description": "Canonical topic name, e.g. 'Red-Black Tree'.",
+          "minLength": 1,
+          "title": "Topic",
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "difficulty": {
+          "$ref": "#/$defs/Difficulty",
+          "default": "intermediate"
+        },
+        "target_duration_seconds": {
+          "default": 300,
+          "maximum": 1200,
+          "minimum": 60,
+          "title": "Target Duration Seconds",
+          "type": "integer"
+        },
+        "language": {
+          "default": "en",
+          "maxLength": 8,
+          "minLength": 2,
+          "title": "Language",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic",
+        "category"
+      ],
+      "title": "Meta",
+      "type": "object"
+    },
+    "Segment": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minimum": 1,
+          "title": "Id",
+          "type": "integer"
+        },
+        "type": {
+          "description": "Semantic segment type, e.g. 'invariants'. Free-form.",
+          "minLength": 1,
+          "title": "Type",
+          "type": "string"
+        },
+        "narration": {
+          "minLength": 1,
+          "title": "Narration",
+          "type": "string"
+        },
+        "visual_cue": {
+          "$ref": "#/$defs/VisualCue"
+        },
+        "duration_hint": {
+          "description": "Seconds; the audio may override this.",
+          "maximum": 120,
+          "minimum": 1,
+          "title": "Duration Hint",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "narration",
+        "visual_cue",
+        "duration_hint"
+      ],
+      "title": "Segment",
+      "type": "object"
+    },
+    "VisualCue": {
+      "description": "The closed set of scene tags a segment may request.\n\nA segment's ``visual_cue`` is the contract with the Storyboard Generator:\nit names *what to show*, decoupled from the segment's semantic ``type``.",
+      "enum": [
+        "title_card",
+        "what_is",
+        "intuition",
+        "analogy_slide",
+        "ds_graph",
+        "algorithm_anim",
+        "code_walkthrough",
+        "complexity_table",
+        "flowchart",
+        "tradeoff_grid",
+        "mnemonic_card",
+        "cheat_sheet",
+        "when_to_apply",
+        "closing"
+      ],
+      "title": "VisualCue",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A validated educational script. Parsing == well-formed; see engine_gate_errors\nfor the stricter production gate.",
+  "properties": {
+    "meta": {
+      "$ref": "#/$defs/Meta"
+    },
+    "segments": {
+      "items": {
+        "$ref": "#/$defs/Segment"
+      },
+      "minItems": 1,
+      "title": "Segments",
+      "type": "array"
+    },
+    "code_template": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Code Template",
+      "type": "object"
+    }
+  },
+  "required": [
+    "meta",
+    "segments"
+  ],
+  "title": "VisuLearnScript",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

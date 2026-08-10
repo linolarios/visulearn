@@ -1,0 +1,92 @@
+{
+  "meta": {
+    "topic": "Red-Black Tree",
+    "category": "dsa",
+    "difficulty": "intermediate",
+    "target_duration_seconds": 300,
+    "language": "en"
+  },
+  "segments": [
+    {
+      "id": 1,
+      "type": "title",
+      "narration": "Red-Black Trees. Self-balancing binary search trees that guarantee logarithmic time for every operation.",
+      "visual_cue": "title_card",
+      "duration_hint": 5
+    },
+    {
+      "id": 2,
+      "type": "what_is",
+      "narration": "A Red-Black Tree is a self-balancing BST where each node stores an extra bit representing color: red or black. The tree maintains balance through a set of invariants that ensure no path is more than twice as long as any other.",
+      "visual_cue": "ds_graph",
+      "duration_hint": 15
+    },
+    {
+      "id": 3,
+      "type": "intuition",
+      "narration": "Think of it as a tree that trims its own branches. After every insertion or deletion, it checks if it got lopsided, then recolors nodes and rotates to restore balance.",
+      "visual_cue": "intuition",
+      "duration_hint": 12
+    },
+    {
+      "id": 4,
+      "type": "invariants",
+      "narration": "Five rules govern the tree. One: every node is either red or black. Two: the root is always black. Three: all leaves, which are NIL nodes, are black. Four: if a node is red, both children are black, no two reds in a row. Five: every path from a node to its descendant leaves contains the same number of black nodes.",
+      "visual_cue": "algorithm_anim",
+      "duration_hint": 25
+    },
+    {
+      "id": 5,
+      "type": "how_it_works",
+      "narration": "Insertion works in three phases. First, insert like a normal BST and color the new node red. Second, fix violations by recoloring and rotating. Third, ensure the root ends black.",
+      "visual_cue": "code_walkthrough",
+      "duration_hint": 30
+    },
+    {
+      "id": 6,
+      "type": "complexity",
+      "narration": "Search, insert, and delete all run in order log n time. Space complexity is order n. This is identical to AVL trees for search, but Red-Black trees are faster for insertions and deletions because they require fewer rotations.",
+      "visual_cue": "complexity_table",
+      "duration_hint": 15
+    },
+    {
+      "id": 7,
+      "type": "tradeoffs",
+      "narration": "Pros: guaranteed balance, efficient for frequent insertions and deletions, used in real systems like the Linux kernel rbtree and C++ map. Cons: more complex to implement than a basic BST, slightly less strictly balanced than AVL, which can mean marginally slower lookups.",
+      "visual_cue": "tradeoff_grid",
+      "duration_hint": 18
+    },
+    {
+      "id": 8,
+      "type": "when_to_apply",
+      "narration": "Use Red-Black trees when you need ordered data with guaranteed performance, especially when insertions and deletions are frequent. Linux uses them for process scheduling. Java's TreeMap and C++ std map are Red-Black trees under the hood.",
+      "visual_cue": "when_to_apply",
+      "duration_hint": 15
+    },
+    {
+      "id": 9,
+      "type": "mnemonic",
+      "narration": "Here's a mnemonic to remember the rules. Every red node has two black nephews. The root is always dressed in black. All paths to the leaves have equal black depth.",
+      "visual_cue": "mnemonic_card",
+      "duration_hint": 10
+    },
+    {
+      "id": 10,
+      "type": "cheat_sheet",
+      "narration": "Cheat sheet. Red-Black tree. Time: log n for all ops. Space: order n. Invariants: five rules. Rotations: left and right. Used in: Linux kernel, C++ map, Java TreeMap.",
+      "visual_cue": "cheat_sheet",
+      "duration_hint": 12
+    },
+    {
+      "id": 11,
+      "type": "closing",
+      "narration": "That's Red-Black Trees. If this helped, check out the AVL Tree video next to compare the two approaches.",
+      "visual_cue": "closing",
+      "duration_hint": 8
+    }
+  ],
+  "code_template": {
+    "python": "class Node:\n    def __init__(self, key):\n        self.key = key\n        self.left = None\n        self.right = None\n        self.color = 'RED'\n        self.parent = None",
+    "cpp": "struct Node {\n    int key;\n    Node *left, *right, *parent;\n    bool color;\n    Node(int k) : key(k), left(nullptr), right(nullptr), parent(nullptr), color(true) {}\n};"
+  }
+}

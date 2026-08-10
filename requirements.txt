@@ -1,0 +1,30 @@
+# ---- Core contract ----
+pydantic>=2,<3
+
+# ---- Research (AGENT.md §1) ----
+ddgs>=9                 # NOT duckduckgo-search (frozen Jul 2025, renamed to ddgs)
+wikipedia-api>=0.6      # primary grounding source: deterministic, no cloud-IP blocking
+
+# ---- LLM providers: install the one(s) you use ----
+groq>=0.11              # llama-3.3-70b-versatile, response_format json mode
+ollama>=0.3             # local llama3.1:8b, structured outputs via `format`
+google-genai>=1.0       # Gemini 2.5 Flash responseSchema (recommended default engine)
+
+# ---- Assets ----
+Pillow>=10
+Pygments>=2.17
+graphviz>=0.20          # Python bindings; ALSO needs the system `graphviz` package
+manim>=0.18             # Community Edition; needs system LaTeX + ffmpeg
+
+# ---- TTS ----
+kokoro-onnx>=0.3        # verify exact package for your build; 24 kHz output
+soundfile>=0.12
+
+# ---- Assembly: PINNED to 1.x API used across the codebase (AGENT.md §3) ----
+moviepy<2
+
+# ---- Dev ----
+pytest>=8
+
+# System dependencies (NOT pip — install separately):
+#   ffmpeg, graphviz, LaTeX (for Manim), and Node.js + @mermaid-js/mermaid-cli

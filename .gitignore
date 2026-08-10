@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Envs / secrets
+.venv/
+venv/
+.env
+*.local
+
+# Generated media (keep the dirs via .gitkeep, ignore contents)
+output/scripts/*
+output/scenes/*
+output/audio/*
+output/videos/*
+assets/manim_cache/*
+media/            # Manim default render dir
+!**/.gitkeep
+
+# OS / editor
+.DS_Store
+*.log

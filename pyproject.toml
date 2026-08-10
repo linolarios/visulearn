@@ -1,0 +1,14 @@
+[project]
+name = "visulearn"
+version = "0.1.0"
+description = "Automated educational-video generator for DSA & Design Patterns."
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

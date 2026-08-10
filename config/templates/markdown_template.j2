@@ -1,0 +1,8 @@
+# {{ meta.topic }}
+
+_Category: {{ meta.category }} · Difficulty: {{ meta.difficulty }}_
+
+{% for seg in segments %}
+## {{ seg.id }}. {{ seg.type }}
+{{ seg.narration }}
+{% endfor %}
