@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import script_engine
 from models import Script
 from script_engine import OllamaProvider, ProviderError, ScriptEngineError, generate_script
 
@@ -30,13 +31,16 @@ class _OllamaStub(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
         self.server.requests.append(json.loads(raw))
-        status, payload = self.server.responses.pop(0)
+        # queued entries are (status, payload) or (status, payload, extra_headers)
+        status, payload, *rest = self.server.responses.pop(0)
         # bytes payload == send it verbatim, so a test can serve a non-JSON body.
         raw_body = isinstance(payload, bytes)
         body = payload if raw_body else json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "text/html" if raw_body else "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (rest[0] if rest else {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -101,6 +105,60 @@ def test_ollama_functional_repair_round_trip(stub_ollama):
     roles = [m["role"] for m in last["messages"]]
     assert roles[-2:] == ["assistant", "user"]      # distinct repair context
     assert "rejected" in last["messages"][-1]["content"]
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """Run the backoff path at full speed and record what it would have waited."""
+    waited = []
+    monkeypatch.setattr(script_engine, "_sleep", waited.append)
+    return waited
+
+
+def test_transport_retries_429_then_succeeds(stub_ollama, no_sleep):
+    """A throttle is a request that never happened - retrying it is not a repair."""
+    stub_ollama.responses.append((429, {"error": "rate limited"}))
+    stub_ollama.responses.append((200, {"message": {"content": json.dumps(VALID)}}))
+
+    script = generate_script(
+        "Red-Black Tree", {}, provider=_provider(stub_ollama), schema=SCHEMA,
+    )
+
+    assert len(script.segments) == 11
+    assert len(stub_ollama.requests) == 2   # one throttled, one served
+    assert no_sleep == [1.0]                # exponential backoff, first step
+
+
+def test_transport_retry_honours_retry_after(stub_ollama, no_sleep):
+    stub_ollama.responses.append((429, {"error": "slow down"}, {"Retry-After": "7"}))
+    stub_ollama.responses.append((200, {"message": {"content": json.dumps(VALID)}}))
+
+    generate_script("Red-Black Tree", {}, provider=_provider(stub_ollama), schema=SCHEMA)
+
+    assert no_sleep == [7.0]  # the provider's number wins over our backoff
+
+
+def test_transport_retry_gives_up_with_a_quota_message(stub_ollama, no_sleep):
+    for _ in range(3):  # DEFAULT_TRANSPORT_ATTEMPTS
+        stub_ollama.responses.append((429, {"error": "rate limited"}))
+
+    with pytest.raises(ProviderError, match="rate-limited") as exc:
+        generate_script("Red-Black Tree", {}, provider=_provider(stub_ollama), schema=SCHEMA)
+
+    assert len(stub_ollama.requests) == 3       # bounded, not infinite
+    assert no_sleep == [1.0, 2.0]               # exponential, no sleep after the last try
+    assert "no quota" in str(exc.value)         # points at the local-Ollama escape hatch
+
+
+def test_transport_does_not_retry_a_response_that_arrived(stub_ollama, no_sleep):
+    """A 400 is an answer. Only the repair loop may re-ask, and only once."""
+    stub_ollama.responses.append((400, {"error": "bad request"}))
+
+    with pytest.raises(ProviderError, match="400"):
+        generate_script("Red-Black Tree", {}, provider=_provider(stub_ollama), schema=SCHEMA)
+
+    assert len(stub_ollama.requests) == 1
+    assert no_sleep == []
 
 
 def test_ollama_functional_reports_done_reason_length(stub_ollama):

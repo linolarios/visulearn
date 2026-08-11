@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,13 @@ MIN_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.4
 MAX_REPAIR_ATTEMPTS = 1  # Golden Rule 1: exactly one repair, then hard-fail.
+
+# Transport-level retry. NOT the repair loop — see the note on _post_json.
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+DEFAULT_TRANSPORT_ATTEMPTS = 3
+DEFAULT_BACKOFF_SECONDS = 1.0
+
+_sleep = time.sleep  # indirection so tests can run the backoff path instantly
 
 
 class ProviderError(RuntimeError):
@@ -116,6 +124,18 @@ class Provider(ABC):
         """
 
 
+def _retry_delay(resp: requests.Response, *, backoff: float, attempt: int) -> float:
+    """Seconds to wait before a retry: the provider's Retry-After, else exponential.
+
+    Retry-After may also be an HTTP-date; that form is not parsed and falls through
+    to the backoff, which is the safe direction to be wrong in.
+    """
+    try:
+        return max(0.0, float(resp.headers.get("Retry-After", "")))
+    except (TypeError, ValueError):
+        return backoff * (2 ** (attempt - 1))
+
+
 def _post_json(
     session: requests.Session,
     url: str,
@@ -126,6 +146,8 @@ def _post_json(
     headers: dict | None = None,
     unreachable_hint: str = "",
     explain_status: Callable[[int, str], str | None] | None = None,
+    attempts: int = DEFAULT_TRANSPORT_ATTEMPTS,
+    backoff: float = DEFAULT_BACKOFF_SECONDS,
 ) -> dict:
     """POST JSON and return the decoded body, or raise `ProviderError`.
 
@@ -136,16 +158,51 @@ def _post_json(
     `explain_status` lets a provider turn a status code into its own actionable
     message (Ollama's model-not-found, Groq's auth) while the plumbing stays shared;
     returning None falls back to the generic form.
+
+    RETRY, AND WHY IT IS NOT THE THING GOLDEN RULE 1 FORBIDS
+    -------------------------------------------------------
+    Rule 1 bans re-running an identical prompt into an identical context *after a
+    validation failure* — the model already answered, and asking again unchanged is
+    superstition. A 429 or a 502 is the opposite situation: the model never answered
+    at all, nothing was validated, and the request is not yet spent. Retrying it is
+    the only way to survive Groq's 30 RPM / TPM ceiling (AGENT.md §6, §9.7) without a
+    single throttle killing a whole batch.
+
+    So: retry the statuses in RETRY_STATUSES with exponential backoff, honouring
+    Retry-After when the provider sends it. Never retry a response that arrived —
+    that is the repair loop's job, exactly once, in generate_script().
+
+    Transport exceptions (connection refused, DNS, timeout) are NOT retried: a dead
+    Ollama daemon stays dead, and three silent 300-second timeouts is a worse failure
+    than one legible one (§7.7).
     """
-    try:
-        resp = session.post(url, json=payload, headers=headers, timeout=timeout)
-    except requests.exceptions.RequestException as exc:
-        hint = f" ({unreachable_hint})" if unreachable_hint else ""
-        raise ProviderError(f"{label} unreachable at {url}{hint}: {exc}") from exc
+    resp = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            resp = session.post(url, json=payload, headers=headers, timeout=timeout)
+        except requests.exceptions.RequestException as exc:
+            hint = f" ({unreachable_hint})" if unreachable_hint else ""
+            raise ProviderError(f"{label} unreachable at {url}{hint}: {exc}") from exc
+
+        if resp.status_code not in RETRY_STATUSES or attempt == max(1, attempts):
+            break
+
+        delay = _retry_delay(resp, backoff=backoff, attempt=attempt)
+        log.warning(
+            "%s returned %d (attempt %d/%d) — backing off %.1fs before retrying",
+            label, resp.status_code, attempt, attempts, delay,
+        )
+        _sleep(delay)
 
     if resp.status_code != 200:
         detail = (resp.text or "").strip()
         special = explain_status(resp.status_code, detail) if explain_status else None
+        if special is None and resp.status_code == 429:
+            special = (
+                f"{label} rate-limited (429), still throttled after {attempts} attempt(s) — "
+                "this is the free-tier RPM/TPM/RPD ceiling. Back off and rerun, or switch to "
+                f"local Ollama, which has no quota (AGENT.md §1.1): {detail}"
+            )
         raise ProviderError(special or f"{label} API error {resp.status_code}: {detail}")
 
     try:
