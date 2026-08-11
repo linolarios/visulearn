@@ -21,8 +21,11 @@ from script_engine import (
     OllamaProvider,
     Provider,
     ProviderError,
+    ProviderResponse,
     ScriptEngineError,
     _load_dotenv,
+    _normalize_finish_reason,
+    _truncation_hint,
     build_provider,
     generate_script,
 )
@@ -170,6 +173,48 @@ def test_build_provider_reads_llm_model_env(monkeypatch):
     monkeypatch.delenv("VISULEARN_OLLAMA_MODEL", raising=False)
     monkeypatch.setenv("VISULEARN_LLM_MODEL", "some:model")
     assert build_provider().model == "some:model"
+
+
+# ---------------- truncation is read, not guessed (AGENT.md 9.9) ------------- #
+
+def test_normalize_finish_reason_unifies_the_three_provider_spellings():
+    assert _normalize_finish_reason("length") == "length"        # Ollama / Groq
+    assert _normalize_finish_reason("MAX_TOKENS") == "length"    # Gemini
+    assert _normalize_finish_reason("STOP") == "stop"
+    assert _normalize_finish_reason(None) == ""
+
+
+def test_truncated_finish_reason_drives_the_hint_and_the_repair(schema):
+    """A cut-off draft must say so in the repair prompt AND in the final error."""
+    cut = ProviderResponse(text='{"meta": {"topic": "Red-Black', finish_reason="length")
+    fake = FakeProvider([cut, cut])
+
+    with pytest.raises(ScriptEngineError) as exc:
+        generate_script("Red-Black Tree", {}, provider=fake, schema=schema)
+
+    assert "TRUNCATED" in str(exc.value) and "finish_reason='length'" in str(exc.value)
+    # the repair attempt was told why the draft was malformed, not just that it was
+    assert "cut off by the output-token limit" in fake.seen_messages[1][-1]["content"]
+
+
+def test_finish_reason_stop_suppresses_the_misleading_truncation_guess(schema):
+    """Text the shape heuristic misreads as cut off, but the provider says finished.
+
+    The old regex-only hint sent users chasing a token budget that was already fine.
+    """
+    prose = ProviderResponse(text='I think a stack is a "LIFO" structure', finish_reason="stop")
+    fake = FakeProvider([prose, prose])
+
+    with pytest.raises(ScriptEngineError) as exc:
+        generate_script("Stack", {}, provider=fake, schema=schema)
+
+    assert "truncat" not in str(exc.value).lower()
+
+
+def test_shape_heuristic_still_fires_when_provider_reports_nothing():
+    """Fallback path: no finish reason available, so the shape guess is all we have."""
+    assert "may be truncated" in _truncation_hint('{"segments": [{"narration": "abc', "")
+    assert _truncation_hint('{"ok": 1}', "") == ""
 
 
 # ---------------- canonical schema is the source of truth (Golden Rule 2) ---- #

@@ -17,6 +17,7 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -49,6 +50,44 @@ class ProviderError(RuntimeError):
     """
 
 
+@dataclass(frozen=True)
+class ProviderResponse:
+    """A provider's raw text plus the metadata the engine needs to interpret it.
+
+    `finish_reason` is normalized to "length" | "stop" | "" (unknown). "length" is
+    authoritative truncation — the output-token budget cut the model off — which
+    AGENT.md §9.9 calls out as the gotcha that mimics a model bug. Reading it beats
+    inferring it: JSON truncated mid-string ends in a quote and looks complete.
+
+    `usage` is whatever token accounting the provider returned, kept for the §6
+    per-stage logging requirement.
+    """
+
+    text: str
+    finish_reason: str = ""
+    usage: dict | None = None
+
+    @property
+    def truncated(self) -> bool:
+        return self.finish_reason == "length"
+
+
+def _normalize_finish_reason(raw: str | None) -> str:
+    """Map a provider's finish reason onto {"length", "stop", ""}.
+
+    The same event has three names on the wire: Ollama `done_reason="length"`,
+    Gemini `finishReason="MAX_TOKENS"`, Groq `finish_reason="length"`.
+    """
+    if not raw:
+        return ""
+    key = str(raw).strip().lower()
+    if key in ("length", "max_tokens", "maxtokens"):
+        return "length"
+    if key in ("stop", "end_turn", "eos"):
+        return "stop"
+    return key
+
+
 class Provider(ABC):
     """Minimal structured-output provider interface."""
 
@@ -64,14 +103,17 @@ class Provider(ABC):
         return schema
 
     @abstractmethod
-    def complete(self, messages: list[dict], schema) -> str:
-        """Send `messages` in structured-output mode and return the assistant's raw text.
+    def complete(self, messages: list[dict], schema) -> ProviderResponse | str:
+        """Send `messages` in structured-output mode and return the assistant's output.
 
         `schema` is the value produced by `adapt_schema` and is passed as the provider's
         structured-output parameter (Ollama `format`, Gemini `responseSchema`, Groq
         `response_format`). Must raise `ProviderError` on transport/HTTP/parse failure.
+
+        Return a `ProviderResponse` so the engine can see the finish reason and token
+        usage. A bare `str` is still accepted — the interface AGENT.md §1 documents —
+        and is read as text with an unknown finish reason.
         """
-        raise NotImplementedError
 
 
 def _post_json(
@@ -156,7 +198,7 @@ class OllamaProvider(Provider):
             )
         return None
 
-    def complete(self, messages: list[dict], schema) -> str:
+    def complete(self, messages: list[dict], schema) -> ProviderResponse:
         data = _post_json(
             self.session,
             f"{self.host}/api/chat",
@@ -175,9 +217,17 @@ class OllamaProvider(Provider):
         if data.get("error"):
             raise ProviderError(f"Ollama error: {data['error']}")
         try:
-            return data["message"]["content"]
+            text = data["message"]["content"]
         except (KeyError, TypeError) as exc:
             raise ProviderError(f"Ollama returned no usable text: {data}") from exc
+        return ProviderResponse(
+            text=text,
+            finish_reason=_normalize_finish_reason(data.get("done_reason")),
+            usage={
+                "prompt_tokens": data.get("prompt_eval_count"),
+                "completion_tokens": data.get("eval_count"),
+            },
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -221,7 +271,7 @@ class GeminiProvider(Provider):
             return f"Gemini API error {status} (bad/invalid API key or schema): {detail}"
         return None
 
-    def complete(self, messages: list[dict], schema) -> str:
+    def complete(self, messages: list[dict], schema) -> ProviderResponse:
         body: dict = {"contents": [], "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": schema,
@@ -249,9 +299,26 @@ class GeminiProvider(Provider):
             explain_status=self._explain_status,
         )
         try:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+            candidate = data["candidates"][0]
+            text = candidate["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
+            # A MAX_TOKENS cutoff can land here with no parts at all, so say so rather
+            # than reporting the generic shape error.
+            reason = _normalize_finish_reason(
+                (data.get("candidates") or [{}])[0].get("finishReason")
+                if isinstance(data.get("candidates"), list) else None
+            )
+            if reason == "length":
+                raise ProviderError(
+                    "Gemini hit the output-token limit before emitting any text — raise "
+                    f"VISULEARN_MAX_OUTPUT_TOKENS (floor {MIN_MAX_OUTPUT_TOKENS})."
+                ) from exc
             raise ProviderError(f"Gemini returned no usable text: {data}") from exc
+        return ProviderResponse(
+            text=text,
+            finish_reason=_normalize_finish_reason(candidate.get("finishReason")),
+            usage=data.get("usageMetadata"),
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -296,7 +363,7 @@ class GroqProvider(Provider):
             return f"Groq auth failed ({status}) — check GROQ_API_KEY: {detail}"
         return None
 
-    def complete(self, messages: list[dict], schema) -> str:
+    def complete(self, messages: list[dict], schema) -> ProviderResponse:
         data = _post_json(
             self.session,
             "https://api.groq.com/openai/v1/chat/completions",
@@ -313,9 +380,15 @@ class GroqProvider(Provider):
             explain_status=self._explain_status,
         )
         try:
-            return data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            text = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError(f"Groq returned no usable text: {data}") from exc
+        return ProviderResponse(
+            text=text,
+            finish_reason=_normalize_finish_reason(choice.get("finish_reason")),
+            usage=data.get("usage"),
+        )
 
 
 def _build_ollama(cfg: dict, _float, _int) -> Provider:
@@ -443,24 +516,50 @@ def generate_script(
     messages = _build_messages(topic, fact_sheet, category, schema=adapted)
 
     attempts = 0
-    raw = prov.complete(messages, adapted)
+    response = _as_response(prov.complete(messages, adapted))
     attempts += 1
-    script, problems = _validate(raw)
+    script, problems = _validate(response.text)
+    problems = _with_truncation_problem(problems, response)
 
     if problems and attempts <= MAX_REPAIR_ATTEMPTS:
         log.warning("script invalid, attempting one repair (%d): %s", attempts, problems)
-        repair = _repair_messages(messages, raw, problems)
-        raw = prov.complete(repair, adapted)  # distinct context -> not a blind identical retry
+        repair = _repair_messages(messages, response.text, problems)
+        # Distinct context (the rejected draft + the errors), not a blind identical retry.
+        response = _as_response(prov.complete(repair, adapted))
         attempts += 1
-        script, problems = _validate(raw)
+        script, problems = _validate(response.text)
+        problems = _with_truncation_problem(problems, response)
 
     if problems or script is None:
-        log.error("script engine hard-fail after %d attempt(s). raw output follows:\n%s", attempts, raw)
+        log.error(
+            "script engine hard-fail after %d attempt(s). raw output follows:\n%s",
+            attempts, response.text,
+        )
         raise ScriptEngineError(
             "script engine could not produce valid output after "
-            f"{attempts} attempt(s): {problems}" + _truncation_hint(raw)
+            f"{attempts} attempt(s): {problems}"
+            + _truncation_hint(response.text, response.finish_reason)
         )
     return script
+
+
+def _as_response(result: ProviderResponse | str) -> ProviderResponse:
+    """Accept the documented `-> str` provider contract as well as ProviderResponse."""
+    return result if isinstance(result, ProviderResponse) else ProviderResponse(text=result)
+
+
+def _with_truncation_problem(problems: list[str], response: ProviderResponse) -> list[str]:
+    """Tell the repair attempt *why* the draft was malformed when it was cut off.
+
+    Only added alongside real problems: a truncated response that somehow still
+    validates is a valid script, and inventing a failure for it would be wrong.
+    """
+    if problems and response.truncated:
+        return problems + [
+            "the response was cut off by the output-token limit before it finished — "
+            "return a shorter script that fits"
+        ]
+    return problems
 
 
 def _validate(raw: str) -> tuple[Script | None, list[str]]:
@@ -495,8 +594,23 @@ def _build_messages(
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def _truncation_hint(raw: str) -> str:
-    """If output looks cut off, guide the user to raise the max-output-token budget."""
+def _truncation_hint(raw: str, finish_reason: str = "") -> str:
+    """Guide the user to raise the token budget when the output was cut off.
+
+    The provider's finish reason is authoritative and decides first — every backend
+    reports it (Ollama `done_reason`, Gemini `finishReason`, Groq `finish_reason`),
+    and AGENT.md §9.9 makes ruling truncation out explicitly a requirement.
+
+    The shape heuristic is only a fallback for providers that report nothing, and it
+    is unreliable in the most common case: JSON cut mid-string ends in `"`, which
+    reads as complete. When the provider affirmatively says it finished, we suppress
+    the guess rather than send the user chasing a token budget that is already fine.
+    """
+    if finish_reason == "length":
+        return (". The provider reported finish_reason='length' — the output was TRUNCATED. "
+                f"Raise VISULEARN_MAX_OUTPUT_TOKENS (floor {MIN_MAX_OUTPUT_TOKENS}) and retry.")
+    if finish_reason:
+        return ""  # provider says it finished on its own; don't guess otherwise
     if not raw or (re.search(r"[\"}\]]\s*$", raw.strip()) is None and '"' in raw):
         return (". Output may be truncated — raise VISULEARN_MAX_OUTPUT_TOKENS "
                 f"(floor {MIN_MAX_OUTPUT_TOKENS}) and retry.")

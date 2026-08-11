@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from models import Script
-from script_engine import OllamaProvider, ProviderError, generate_script
+from script_engine import OllamaProvider, ProviderError, ScriptEngineError, generate_script
 
 FIXTURE = Path(__file__).parent / "fixtures" / "rbt_script.json"
 VALID = json.loads(FIXTURE.read_text())  # 11 segments, opens title_card, closes, passes gate
@@ -101,6 +101,21 @@ def test_ollama_functional_repair_round_trip(stub_ollama):
     roles = [m["role"] for m in last["messages"]]
     assert roles[-2:] == ["assistant", "user"]      # distinct repair context
     assert "rejected" in last["messages"][-1]["content"]
+
+
+def test_ollama_functional_reports_done_reason_length(stub_ollama):
+    """Ollama's done_reason reaches the engine, so truncation is stated as fact."""
+    cut = json.dumps(VALID)[:120]  # a valid JSON prefix: exactly the AGENT.md 9.9 gotcha
+    for _ in range(2):
+        stub_ollama.responses.append(
+            (200, {"message": {"content": cut}, "done_reason": "length", "eval_count": 4096})
+        )
+
+    with pytest.raises(ScriptEngineError, match="TRUNCATED") as exc:
+        generate_script(
+            "Red-Black Tree", {}, provider=_provider(stub_ollama), schema=SCHEMA,
+        )
+    assert "VISULEARN_MAX_OUTPUT_TOKENS" in str(exc.value)
 
 
 def test_ollama_functional_non_json_200_is_provider_error(stub_ollama):
