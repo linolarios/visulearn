@@ -19,14 +19,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from models import Script  # noqa: E402
+from models import canonical_schema  # noqa: E402
 
 
 def main() -> None:
-    schema = Script.model_json_schema()
-    # A couple of provider JSON-schema modes want these at the top level.
-    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
-    schema["title"] = "VisuLearnScript"
+    # models.canonical_schema() is the single definition — the Script Engine calls the
+    # same function, so this file and the wire schema cannot drift apart.
+    schema = canonical_schema()
 
     out = Path(__file__).resolve().parent.parent / "config" / "schemas" / "script_schema.json"
     out.parent.mkdir(parents=True, exist_ok=True)

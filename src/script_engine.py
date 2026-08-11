@@ -22,7 +22,7 @@ from typing import Callable
 
 import requests
 
-from models import Script, engine_gate_errors
+from models import Script, canonical_schema, engine_gate_errors
 
 log = logging.getLogger("visulearn.script_engine")
 
@@ -373,6 +373,8 @@ class ScriptEngineError(RuntimeError):
     """The engine exhausted its one repair and could not produce a valid Script."""
 
 
+
+
 def generate_script(
     topic: str,
     fact_sheet: dict,
@@ -389,7 +391,7 @@ def generate_script(
     """
     prov = provider or build_provider(config=config)
     if schema is None:
-        schema = json.loads(DEFAULT_SCHEMA_PATH.read_text())
+        schema = canonical_schema()
     adapted = prov.adapt_schema(schema)
     messages = _build_messages(topic, fact_sheet, category, schema=adapted)
 

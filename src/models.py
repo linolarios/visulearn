@@ -206,6 +206,24 @@ class Storyboard(BaseModel):
 # Stage gates & helpers                                                        #
 # --------------------------------------------------------------------------- #
 
+def canonical_schema() -> dict:
+    """The canonical outbound JSON Schema for `Script` (Golden Rule 2).
+
+    This is the ONE definition. `scripts/generate_schema.py` writes exactly this to
+    `config/schemas/script_schema.json` for external consumers and the AGENT.md §7.1
+    drift check, and the Script Engine calls it directly rather than reading that file
+    — so an un-regenerated JSON file can never reach a provider as a stale wire schema.
+
+    The two post-processing steps below are part of the contract, not cosmetics:
+    some provider JSON-schema modes want `$schema` at the top level, and `title`
+    becomes the schema name Groq's `response_format` echoes back.
+    """
+    schema = Script.model_json_schema()
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    schema["title"] = "VisuLearnScript"
+    return schema
+
+
 def engine_gate_errors(
     script: Script, *, min_segments: int = 8, max_segments: int = 12
 ) -> list[str]:

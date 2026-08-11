@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from models import Script
+from models import Script, canonical_schema
 from script_engine import (
     GeminiProvider,
     GroqProvider,
@@ -40,9 +40,11 @@ class FakeProvider(Provider):
         self.outputs = list(outputs)
         self.call_count = 0
         self.seen_messages = []
+        self.seen_schema = []
 
     def complete(self, messages, schema):
         self.call_count += 1
+        self.seen_schema.append(schema)
         if self.call_count > len(self.outputs):
             # The engine must never issue a third call. Fail loudly if it does.
             raise AssertionError(
@@ -168,6 +170,22 @@ def test_build_provider_reads_llm_model_env(monkeypatch):
     monkeypatch.delenv("VISULEARN_OLLAMA_MODEL", raising=False)
     monkeypatch.setenv("VISULEARN_LLM_MODEL", "some:model")
     assert build_provider().model == "some:model"
+
+
+# ---------------- canonical schema is the source of truth (Golden Rule 2) ---- #
+
+def test_committed_schema_matches_the_model(schema):
+    """AGENT.md 7.1 as a unit test: the committed JSON must be what the model emits."""
+    assert canonical_schema() == schema, (
+        "config/schemas/script_schema.json is stale - run scripts/generate_schema.py"
+    )
+
+
+def test_generate_script_defaults_to_model_derived_schema():
+    """With no schema passed, the engine derives it from Pydantic, never from disk."""
+    fake = FakeProvider([VALID_SCRIPT])
+    generate_script("Red-Black Tree", {}, provider=fake)
+    assert fake.seen_schema[0] == canonical_schema()
 
 
 def test_load_dotenv_sets_model(monkeypatch, tmp_path):

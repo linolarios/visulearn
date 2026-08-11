@@ -5,10 +5,10 @@ pydantic>=2,<3
 ddgs>=9                 # NOT duckduckgo-search (frozen Jul 2025, renamed to ddgs)
 wikipedia-api>=0.6      # primary grounding source: deterministic, no cloud-IP blocking
 
-# ---- LLM providers: install the one(s) you use ----
-groq>=0.11              # llama-3.3-70b-versatile, response_format json mode
-ollama>=0.3             # local llama3.1:8b, structured outputs via `format`
-google-genai>=1.0       # Gemini 2.5 Flash responseSchema (recommended default engine)
+# ---- LLM providers ----
+# src/script_engine.py talks to Ollama / Gemini / Groq over their plain HTTP APIs
+# behind one Provider interface, so no vendor SDK is required at runtime.
+requests>=2.31          # the only transport dependency of the Script Engine
 
 # ---- Assets ----
 Pillow>=10
@@ -25,6 +25,7 @@ moviepy<2
 
 # ---- Dev ----
 pytest>=8
+ollama>=0.3             # dev only: scripts/smoke_ollama.py. NOT used by src/script_engine.py.
 
 # System dependencies (NOT pip — install separately):
 #   ffmpeg, graphviz, LaTeX (for Manim), and Node.js + @mermaid-js/mermaid-cli
