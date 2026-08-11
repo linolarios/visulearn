@@ -1,0 +1,20 @@
+services:
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    ports:
+      - "11500:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+    # GPU: uncomment the block below (needs NVIDIA Container Toolkit)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  ollama:
