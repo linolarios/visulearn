@@ -37,9 +37,10 @@ Read it fully before writing code. The **Golden Rules** are non-negotiable.
 | Language | Python 3.10+ | `ddgs` requires ≥3.10 |
 | Validation | Pydantic v2 | Source of truth for the script schema |
 | Research | **`ddgs`** (NOT `duckduckgo-search`) + Wikipedia API | `duckduckgo-search` was frozen Jul 2025 → renamed `ddgs`. Import `from ddgs import DDGS`. DDG blocks cloud IPs — prefer Wikipedia API for canonical CS facts; DDG is fallback. Drop arxiv for this domain (GoF/CLRS aren't on arxiv). |
-| LLM (cloud, fast) | Groq — **`llama-3.3-70b-versatile`** | Free tier: 30 RPM, ~1,000 RPD, TPM (~6–12K) is the *binding* constraint. Use `response_format`. |
-| LLM (cloud, reliable JSON) | Google AI Studio — Gemini 2.5 Flash | Most generous free tier; native `responseSchema`. Recommended default for the Script Engine. |
-| LLM (local, small) | Ollama — **`llama3.1:8b`** (NOT "llama 3.3 8B" — that size does not exist) | Use Ollama structured outputs (`format=<json schema>`). |
+| LLM (local, **recommended**) | Ollama — **`qwen3:14b`** (instruct/non-thinking) | **No token limits — this is the durable answer to free-tier caps.** Apache 2.0. Grammar-constrained JSON via `format=<schema>`. Size by VRAM: `qwen3:8b` (8 GB), `qwen3:14b` (16 GB), `qwen3.6:27b`/`qwen3:30b-a3b` (24 GB). CPU-only is fine for a batch pipeline. See §1.1. |
+| LLM (cloud, reliable JSON) | Google AI Studio — Gemini 2.5 Flash | Native `responseSchema`. Good quality, but **free-tier token/RPD caps are restrictive for a multi-call pipeline** — you *will* exhaust them generating many videos. Fine for low volume; not for batch. |
+| LLM (cloud, fast) | Groq — **`llama-3.3-70b-versatile`** | Free tier: 30 RPM, ~1,000 RPD, TPM (~6–12K) is the *binding* constraint. Use `response_format`. Same free-tier-cap caveat as Gemini. |
+| LLM (dev/CI only) | Ollama — `gemma3:4b` | Cheap smoke-test model. Emits schema-valid JSON (grammar-constrained) but content quality is weak — do NOT ship scripts from it. Also note: `llama3.3:8b` does NOT exist; the 8B is `llama3.1:8b`. |
 | TTS | Kokoro-82M (ONNX, Apache 2.0) | **24 kHz** mono output — verify before hardcoding WAV rate. Piper (22.05 kHz) is the stable fallback. |
 | Static graphics | Pillow (PIL) | Title/bullets/tables/code/cheat sheets |
 | Code highlight | Pygments | |
@@ -52,6 +53,33 @@ Read it fully before writing code. The **Golden Rules** are non-negotiable.
 Model choices should be re-checked against a live model list at build time — free-tier model
 names rot in weeks. Verify the model exists on the account before hardcoding it (pull the
 provider's live model list with the real key; the marketing page and the entitlement differ).
+
+### 1.1 Model selection & token limits (read before wiring the Script Engine)
+
+**Every hosted free tier has a daily cap** — Gemini, Groq, OpenRouter, Qwen Cloud alike.
+A video pipeline makes several LLM calls per video (disambiguation + script + optional
+planning), so at any real volume you *will* hit the ceiling. This was observed with
+Gemini 2.5 Flash: quality is good, but the free-tier token/request budget runs out fast.
+
+**The only setup with no token limit is local inference.** Running an open-weight model
+in Ollama is bounded by hardware and time, not a quota — generate hundreds of scripts
+overnight for the cost of electricity. This is why `qwen3:14b` (local) is the default,
+not a cloud model. Keep a cloud provider (Gemini) wired behind the same interface as a
+fallback / low-volume option, but do not make it the primary for batch runs.
+
+Two non-obvious rules when the LLM is a local Qwen3:
+
+- **Use the non-thinking (Instruct) variant.** Qwen3 has a toggleable thinking mode;
+  for constrained JSON you want it OFF (pull the instruct checkpoint or disable thinking).
+  Reasoning traces waste compute and add nothing when the grammar already forces JSON.
+- **Raise the output-token limit.** Set Ollama's `num_predict` high enough (e.g. 4096)
+  that a full 8–12-segment script isn't truncated mid-object. A truncated response is
+  valid-JSON-prefix that fails validation and *looks* like a model bug — rule it out
+  explicitly. (Same class of gotcha as Groq/Gemini `max_tokens`.)
+
+`gemma3:4b` is for dev/CI smoke tests only — grammar-constrained decoding makes its JSON
+*shape* valid, but a 4B model's *content* is too weak to ship. Prove quality against the
+model you'll actually run.
 
 ---
 
@@ -97,6 +125,16 @@ Define in `src/models.py` (Pydantic v2). Emit `script_schema.json` from it.
 The Script Engine returns a **validated `Script` instance**, never a raw string. Storyboard
 consumes `Script`, emits a validated `Storyboard { scenes: list[Scene] }`.
 
+**Providers do NOT accept the same schema.** The generated `script_schema.json` goes
+straight into Ollama's `format=`, but Gemini's `responseSchema` is an OpenAPI subset and
+Groq's `json_schema` mode has its own constraints — keywords like `additionalProperties:
+false`, `$defs`/`$ref`, and some `enum`/`format` constructs may be rejected or ignored
+depending on the provider. Verify the schema against each provider's *current* docs and
+transform it **per-provider on the way out** (inline `$defs`, drop/rename unsupported
+keywords). Never relax `src/models.py` to appease a provider — the Pydantic model stays
+strict; only the outbound wire-schema is adapted. Something that works on Ollama can 500
+on Gemini, and it's invisible until you switch providers.
+
 ---
 
 ## 4. Stages & Acceptance Criteria
@@ -110,7 +148,7 @@ LLM call (this *is* an LLM call — budget it). Reject non-DSA/non-pattern topic
 **Research Agent** — Done when: returns a fact sheet `{definition, inventor, year, use_cases,
 misconceptions}` from Wikipedia (primary) with `ddgs` fallback. Must not hang or crash on
 network/rate-limit — wrap in timeout + graceful empty-result path. Grounding is *advisory*;
-for canonical topics the 70B model already knows the complexities.
+for canonical topics a capable model already knows the complexities.
 
 **Script Engine** — Done when: output parses as a valid `Script` (Pydantic) with 8–12 segments,
 every `visual_cue` in the enum, narration free of raw symbols (`O(n)` → "order n"). Uses
@@ -162,7 +200,9 @@ matching template → Pillow fallback slide. Manim renders 1080p MP4 segments (5
 - **Resume**: on re-run, skip any stage whose cached artifact exists and validates.
 - **Structured logging** per stage: inputs hash, model+params, tokens, cost, duration, ok/err.
 - **Cost/quota tracking**: count LLM calls *per video* (disambiguation + script + optional
-  planning), not per video = 1 call. Respect Groq TPM as the real limiter.
+  planning), not per video = 1 call. On a cloud provider, respect the free-tier cap (Groq TPM,
+  Gemini RPD/tokens) and back off before it hard-fails a batch. On local Ollama there is no
+  quota — skip quota logic and just log latency/tokens (§1.1).
 - CLI: `python visulearn.py script "Red-Black Tree" --out output/scripts/rbt.json`
   and `python visulearn.py video output/scripts/rbt.json --out output/videos/rbt.mp4`.
   Batch: `--batch topics.txt`.
@@ -170,6 +210,25 @@ matching template → Pillow fallback slide. Manim renders 1080p MP4 segments (5
 ---
 
 ## 7. Testing
+
+**Preflight — the agent runs and reports these BEFORE writing stage code:**
+
+1. **Contract in sync**: run `python scripts/generate_schema.py`; confirm
+   `config/schemas/script_schema.json` has no diff. If it changed, the committed schema was
+   stale — flag it, don't hand-edit the JSON.
+2. **Baseline green**: run `pytest`; expect 9 passing. This is the floor; never drop below it.
+3. **Runtime reachable**: the target backend actually responds — `ollama list` shows the
+   configured model and the daemon answers on `127.0.0.1:11434`, or the cloud key env var is
+   set. Prove constrained JSON end-to-end with a one-call `format=schema` smoke check.
+4. **Per-provider schema accepted**: for each provider you wire, confirm the outbound schema
+   is accepted (see §3) — don't assume Ollama-valid == Gemini-valid.
+5. **Output not truncated**: max-output tokens (`num_predict` / `max_tokens`) is high enough
+   for a full script; a truncated response fails validation and mimics a model bug.
+6. **Config, not hardcode**: model name, provider, temperature come from env/config.
+7. **Failures are legible**: model-not-found / connection-refused / auth errors surface a
+   readable message — this is the exact class that produced "no JSON object found" upstream.
+
+**Test suite:**
 
 - **Schema tests**: malformed LLM output is rejected; repair loop fires once; hard-fail logs raw.
 - **Renderer tests**: each renderer produces correct dimensions; forced failure triggers Pillow fallback.
@@ -184,7 +243,8 @@ matching template → Pillow fallback slide. Manim renders 1080p MP4 segments (5
 
 `python visulearn.py video "Red-Black Tree"` runs topic→MP4 unattended, produces a 5-min
 1080p MP4 with synced narration, degrades gracefully if Manim/LaTeX is absent, resumes from
-cache on re-run, and stays within the chosen free tier. No stage emits unvalidated JSON.
+cache on re-run, and stays within the chosen provider's limits (or runs unlimited on local
+Ollama). No stage emits unvalidated JSON.
 
 ---
 
@@ -198,3 +258,11 @@ cache on re-run, and stays within the chosen free tier. No stage emits unvalidat
    system prompt. Prompt-and-pray is why models return prose and the parser finds no JSON.
 6. Manim needs LaTeX; treat its absence as a first-class fallback path, not an error.
 7. Groq's binding limit is TPM, and free-tier model names change frequently — verify live.
+8. **Every hosted free tier has token/RPD caps** — a multi-call video pipeline exhausts them
+   (Gemini included). Local Ollama is the only limit-free path; default to it for batch (§1.1).
+9. **Local truncation**: Ollama's default `num_predict` can cut a full script mid-JSON.
+   Raise it (~4096). Truncated valid-prefix JSON fails validation and looks like a model bug.
+10. **Provider schema drift**: Ollama `format`, Gemini `responseSchema`, and Groq `json_schema`
+    accept different schema subsets — adapt the outbound schema per provider, never the model (§3).
+11. **Qwen3 thinking mode**: use the Instruct (non-thinking) variant for JSON; reasoning traces
+    waste tokens and add nothing under grammar-constrained decoding.

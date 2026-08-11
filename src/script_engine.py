@@ -18,6 +18,7 @@ import os
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Callable
 
 import requests
 
@@ -83,7 +84,7 @@ class OllamaProvider(Provider):
     def __init__(
         self,
         *,
-        model: str = "qwen3:14b",
+        model: str = "llama3.1:8b",
         host: str = "http://127.0.0.1:11434",
         temperature: float = DEFAULT_TEMPERATURE,
         num_predict: int = DEFAULT_MAX_OUTPUT_TOKENS,
@@ -270,10 +271,83 @@ class GroqProvider(Provider):
             raise ProviderError(f"Groq returned no usable text: {data}") from exc
 
 
+def _build_ollama(cfg: dict, _float, _int) -> Provider:
+    return OllamaProvider(
+        model=(cfg.get("model")
+               or os.getenv("VISULEARN_LLM_MODEL")
+               or os.getenv("VISULEARN_OLLAMA_MODEL")
+               or "llama3.1:8b"),
+        host=cfg.get("host") or os.getenv("VISULEARN_OLLAMA_HOST", "http://127.0.0.1:11434"),
+        temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
+        num_predict=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+    )
+
+
+def _build_gemini(cfg: dict, _float, _int) -> Provider:
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not key:
+        raise ProviderError("Gemini selected but no key - set GEMINI_API_KEY or GOOGLE_API_KEY.")
+    return GeminiProvider(
+        api_key=key,
+        model=cfg.get("model") or os.getenv("VISULEARN_GEMINI_MODEL", "gemini-2.5-flash"),
+        temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
+        max_output_tokens=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+    )
+
+
+def _build_groq(cfg: dict, _float, _int) -> Provider:
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        raise ProviderError("Groq selected but no key - set GROQ_API_KEY.")
+    return GroqProvider(
+        api_key=key,
+        model=cfg.get("model") or os.getenv("VISULEARN_GROQ_MODEL", "llama-3.3-70b-versatile"),
+        temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
+        max_tokens=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+    )
+
+
+_PROVIDER_BUILDERS: dict[str, Callable[..., Provider]] = {
+    "ollama": _build_ollama,
+    "gemini": _build_gemini,
+    "groq": _build_groq,
+}
+
+
+def _load_dotenv(path: Path | None = None) -> None:
+    """Load KEY=VALUE lines from a .env file into the environment (no dependency).
+
+    Real environment variables always win: keys already present in os.environ are
+    left untouched. Handles an `export` prefix, surrounding quotes, and # comments.
+    """
+    path = path or (REPO_ROOT / ".env")
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip(chr(39) + chr(34)).strip()
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
 def build_provider(config: dict | None = None) -> Provider:
-    """Factory selecting a provider from env/config. Ollama is the batch default."""
+    """Factory selecting a provider from env/config. Ollama is the batch default.
+
+    Uses a provider-name -> builder registry (dict dispatch) instead of an if/else
+    ladder. Runs the dependency-free .env loader first so local configuration under
+    `<REPO_ROOT>/.env` (e.g. VISULEARN_LLM_MODEL) takes effect. Real env vars win.
+    """
+    _load_dotenv()
     cfg = config or {}
-    provider = cfg.get("provider") or os.getenv("VISULEARN_LLM_PROVIDER", "ollama").lower()
+    provider = (cfg.get("provider") or os.getenv("VISULEARN_LLM_PROVIDER", "ollama")).lower()
 
     def _float(name: str, default: float) -> float:
         raw = cfg.get(name) or os.getenv(name)
@@ -283,34 +357,12 @@ def build_provider(config: dict | None = None) -> Provider:
         raw = cfg.get(name) or os.getenv(name)
         return int(raw) if raw is not None else default
 
-    if provider == "ollama":
-        return OllamaProvider(
-            model=cfg.get("model") or os.getenv("VISULEARN_OLLAMA_MODEL", "qwen3:14b"),
-            host=cfg.get("host") or os.getenv("VISULEARN_OLLAMA_HOST", "http://127.0.0.1:11434"),
-            temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
-            num_predict=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+    builder = _PROVIDER_BUILDERS.get(provider)
+    if builder is None:
+        raise ProviderError(
+            f"Unknown VISULEARN_LLM_PROVIDER={provider!r} (use ollama, gemini, or groq)."
         )
-    if provider == "gemini":
-        key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not key:
-            raise ProviderError("Gemini selected but no key — set GEMINI_API_KEY or GOOGLE_API_KEY.")
-        return GeminiProvider(
-            api_key=key,
-            model=cfg.get("model") or os.getenv("VISULEARN_GEMINI_MODEL", "gemini-2.5-flash"),
-            temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
-            max_output_tokens=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
-        )
-    if provider == "groq":
-        key = os.getenv("GROQ_API_KEY")
-        if not key:
-            raise ProviderError("Groq selected but no key — set GROQ_API_KEY.")
-        return GroqProvider(
-            api_key=key,
-            model=cfg.get("model") or os.getenv("VISULEARN_GROQ_MODEL", "llama-3.3-70b-versatile"),
-            temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
-            max_tokens=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
-        )
-    raise ProviderError(f"Unknown VISULEARN_LLM_PROVIDER={provider!r} (use ollama, gemini, or groq).")
+    return builder(cfg, _float, _int)
 
 
 # --------------------------------------------------------------------------- #

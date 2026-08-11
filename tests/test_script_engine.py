@@ -9,6 +9,7 @@ Also unit-tests the per-provider OUTBOUND schema adaptation (Ollama / Gemini / G
 """
 import json
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,8 @@ from script_engine import (
     Provider,
     ProviderError,
     ScriptEngineError,
+    _load_dotenv,
+    build_provider,
     generate_script,
 )
 
@@ -150,5 +153,33 @@ def test_gemini_adapt_schema_inlines_and_strips(schema):
     Script.model_validate_json(VALID_SCRIPT)
 
 
-def test_default_ollama_model_is_qwen3():
-    assert OllamaProvider().model == "qwen3:14b"
+def test_default_ollama_model_is_llama31():
+    assert OllamaProvider().model == "llama3.1:8b"
+
+
+def test_build_provider_defaults_to_llama31(monkeypatch):
+    monkeypatch.setattr("script_engine._load_dotenv", lambda *a, **k: None)
+    monkeypatch.delenv("VISULEARN_LLM_MODEL", raising=False)
+    monkeypatch.delenv("VISULEARN_OLLAMA_MODEL", raising=False)
+    assert build_provider().model == "llama3.1:8b"
+
+
+def test_build_provider_reads_llm_model_env(monkeypatch):
+    monkeypatch.delenv("VISULEARN_OLLAMA_MODEL", raising=False)
+    monkeypatch.setenv("VISULEARN_LLM_MODEL", "some:model")
+    assert build_provider().model == "some:model"
+
+
+def test_load_dotenv_sets_model(monkeypatch, tmp_path):
+    monkeypatch.delenv("VISULEARN_LLM_MODEL", raising=False)
+    monkeypatch.delenv("VISULEARN_OLLAMA_HOST", raising=False)
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(chr(10).join([
+        "export VISULEARN_LLM_MODEL=foo:bar",
+        "# a comment",
+        "export VISULEARN_OLLAMA_HOST=http://1.2.3.4:11434",
+        "",
+    ]))
+    _load_dotenv(dotenv)
+    assert os.environ["VISULEARN_LLM_MODEL"] == "foo:bar"
+    assert os.environ["VISULEARN_OLLAMA_HOST"] == "http://1.2.3.4:11434"
