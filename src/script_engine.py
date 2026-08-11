@@ -74,6 +74,52 @@ class Provider(ABC):
         raise NotImplementedError
 
 
+def _post_json(
+    session: requests.Session,
+    url: str,
+    *,
+    payload: dict,
+    timeout: float,
+    label: str,
+    headers: dict | None = None,
+    unreachable_hint: str = "",
+    explain_status: Callable[[int, str], str | None] | None = None,
+) -> dict:
+    """POST JSON and return the decoded body, or raise `ProviderError`.
+
+    Every wire-level failure funnels through here so the `Provider.complete()`
+    contract — ProviderError on transport/HTTP/parse failure — holds identically for
+    all three providers instead of being re-derived (and half-forgotten) in each.
+
+    `explain_status` lets a provider turn a status code into its own actionable
+    message (Ollama's model-not-found, Groq's auth) while the plumbing stays shared;
+    returning None falls back to the generic form.
+    """
+    try:
+        resp = session.post(url, json=payload, headers=headers, timeout=timeout)
+    except requests.exceptions.RequestException as exc:
+        hint = f" ({unreachable_hint})" if unreachable_hint else ""
+        raise ProviderError(f"{label} unreachable at {url}{hint}: {exc}") from exc
+
+    if resp.status_code != 200:
+        detail = (resp.text or "").strip()
+        special = explain_status(resp.status_code, detail) if explain_status else None
+        raise ProviderError(special or f"{label} API error {resp.status_code}: {detail}")
+
+    try:
+        return resp.json()
+    except ValueError as exc:
+        # A 200 carrying something other than JSON — proxy interstitial, captive
+        # portal, gateway HTML — is a parse failure, not model output. Catching it
+        # here is what stops it reaching the engine disguised as an unparseable
+        # response and producing the "no JSON object found" class of bug report.
+        content_type = resp.headers.get("Content-Type", "no content-type")
+        raise ProviderError(
+            f"{label} returned a non-JSON body (HTTP 200, {content_type}): "
+            f"{(resp.text or '')[:200]!r}"
+        ) from exc
+
+
 # --------------------------------------------------------------------------- #
 # Ollama — local, the batch default (AGENT.md §1.1 / task spec)                #
 # --------------------------------------------------------------------------- #
@@ -102,34 +148,36 @@ class OllamaProvider(Provider):
         # Ollama's `format` accepts a full draft-2020-12 schema including $defs/$ref.
         return schema
 
+    def _explain_status(self, status: int, detail: str) -> str | None:
+        if status == 404 and "model" in detail.lower():
+            return (
+                f"Ollama model not found: {self.model!r} — pull it with "
+                f"`ollama pull {self.model}` ({detail})"
+            )
+        return None
+
     def complete(self, messages: list[dict], schema) -> str:
-        url = f"{self.host}/api/chat"
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "format": schema,
-            "options": {"temperature": self.temperature, "num_predict": self.num_predict},
-        }
-        try:
-            resp = self.session.post(url, json=payload, timeout=self.timeout)
-        except requests.exceptions.RequestException as exc:
-            raise ProviderError(
-                f"Ollama unreachable at {self.host} (is the daemon running? `ollama serve`): {exc}"
-            ) from exc
-
-        if resp.status_code != 200:
-            detail = resp.text or ""
-            if resp.status_code == 404 and "model" in detail.lower():
-                raise ProviderError(
-                    f"Ollama model not found: {self.model!r} — pull it with `ollama pull {self.model}` ({detail.strip()})"
-                )
-            raise ProviderError(f"Ollama API error {resp.status_code}: {detail.strip()}")
-
-        data = resp.json()
+        data = _post_json(
+            self.session,
+            f"{self.host}/api/chat",
+            payload={
+                "model": self.model,
+                "messages": messages,
+                "stream": False,
+                "format": schema,
+                "options": {"temperature": self.temperature, "num_predict": self.num_predict},
+            },
+            timeout=self.timeout,
+            label="Ollama",
+            unreachable_hint="is the daemon running? `ollama serve`",
+            explain_status=self._explain_status,
+        )
         if data.get("error"):
             raise ProviderError(f"Ollama error: {data['error']}")
-        return data["message"]["content"]
+        try:
+            return data["message"]["content"]
+        except (KeyError, TypeError) as exc:
+            raise ProviderError(f"Ollama returned no usable text: {data}") from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -167,6 +215,12 @@ class GeminiProvider(Provider):
         defs = schema.get("$defs", {})
         return _inline_schema(schema, defs, supported=self._SUPPORTED_KEYS)
 
+    @staticmethod
+    def _explain_status(status: int, detail: str) -> str | None:
+        if status in (400, 401, 403):
+            return f"Gemini API error {status} (bad/invalid API key or schema): {detail}"
+        return None
+
     def complete(self, messages: list[dict], schema) -> str:
         body: dict = {"contents": [], "generationConfig": {
             "responseMimeType": "application/json",
@@ -185,21 +239,15 @@ class GeminiProvider(Provider):
                     "parts": [{"text": msg["content"]}],
                 })
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
-        headers = {"x-goog-api-key": self.api_key, "Content-Type": "application/json"}
-        try:
-            resp = self.session.post(url, json=body, headers=headers, timeout=self.timeout)
-        except requests.exceptions.RequestException as exc:
-            raise ProviderError(f"Gemini unreachable: {exc}") from exc
-
-        if resp.status_code in (400, 401, 403):
-            raise ProviderError(
-                f"Gemini API error {resp.status_code} (bad/invalid API key or schema): {resp.text.strip()}"
-            )
-        if resp.status_code != 200:
-            raise ProviderError(f"Gemini API error {resp.status_code}: {resp.text.strip()}")
-
-        data = resp.json()
+        data = _post_json(
+            self.session,
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
+            payload=body,
+            headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+            timeout=self.timeout,
+            label="Gemini",
+            explain_status=self._explain_status,
+        )
         try:
             return data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -242,29 +290,28 @@ class GroqProvider(Provider):
             },
         }
 
+    @staticmethod
+    def _explain_status(status: int, detail: str) -> str | None:
+        if status in (401, 403):
+            return f"Groq auth failed ({status}) — check GROQ_API_KEY: {detail}"
+        return None
+
     def complete(self, messages: list[dict], schema) -> str:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "response_format": schema,
-        }
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        try:
-            resp = self.session.post(url, json=payload, headers=headers, timeout=self.timeout)
-        except requests.exceptions.RequestException as exc:
-            raise ProviderError(f"Groq unreachable: {exc}") from exc
-
-        if resp.status_code in (401, 403):
-            raise ProviderError(
-                f"Groq auth failed ({resp.status_code}) — check GROQ_API_KEY: {resp.text.strip()}"
-            )
-        if resp.status_code != 200:
-            raise ProviderError(f"Groq API error {resp.status_code}: {resp.text.strip()}")
-
-        data = resp.json()
+        data = _post_json(
+            self.session,
+            "https://api.groq.com/openai/v1/chat/completions",
+            payload={
+                "model": self.model,
+                "messages": messages,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "response_format": schema,
+            },
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            timeout=self.timeout,
+            label="Groq",
+            explain_status=self._explain_status,
+        )
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:

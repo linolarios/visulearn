@@ -31,9 +31,11 @@ class _OllamaStub(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b"{}"
         self.server.requests.append(json.loads(raw))
         status, payload = self.server.responses.pop(0)
-        body = json.dumps(payload).encode()
+        # bytes payload == send it verbatim, so a test can serve a non-JSON body.
+        raw_body = isinstance(payload, bytes)
+        body = payload if raw_body else json.dumps(payload).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/html" if raw_body else "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -99,6 +101,27 @@ def test_ollama_functional_repair_round_trip(stub_ollama):
     roles = [m["role"] for m in last["messages"]]
     assert roles[-2:] == ["assistant", "user"]      # distinct repair context
     assert "rejected" in last["messages"][-1]["content"]
+
+
+def test_ollama_functional_non_json_200_is_provider_error(stub_ollama):
+    """A 200 carrying HTML (proxy interstitial, gateway page) is a ProviderError.
+
+    Before the shared _post_json guard this escaped as a bare JSONDecodeError, which
+    is the "no JSON object found" failure wearing a disguise.
+    """
+    stub_ollama.responses.append((200, b"<html><body>502 Bad Gateway</body></html>"))
+
+    with pytest.raises(ProviderError, match="non-JSON body") as exc:
+        generate_script("Stack", {}, provider=_provider(stub_ollama), schema={})
+    assert "502 Bad Gateway" in str(exc.value)  # the actual body is quoted back
+
+
+def test_ollama_functional_unexpected_shape_is_provider_error(stub_ollama):
+    """A well-formed JSON 200 that is missing message.content must not KeyError."""
+    stub_ollama.responses.append((200, {"unexpected": "shape"}))
+
+    with pytest.raises(ProviderError, match="no usable text"):
+        generate_script("Stack", {}, provider=_provider(stub_ollama), schema={})
 
 
 def test_ollama_functional_model_not_found_readable(stub_ollama):
