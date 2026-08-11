@@ -49,6 +49,58 @@ DEFAULT_BACKOFF_SECONDS = 1.0
 
 _sleep = time.sleep  # indirection so tests can run the backoff path instantly
 
+# Presence sentinel: distinguishes "not configured" from a genuine falsy value like
+# temperature=0. The old `cfg.get(name) or os.getenv(name)` could not represent an
+# explicit 0, silently falling back to DEFAULT_TEMPERATURE (#20 / #22).
+_UNSET = object()
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    """Resolved provider settings; the single source of truth for `build_provider`.
+
+    Populated in `build_provider` from its `config` dict (indexed by env-var name)
+    or the equivalent `VISULEARN_*` environment variables. Documented keys
+    (AGENT.md §6 / §7.6 — config, not hardcode):
+
+      VISULEARN_LLM_PROVIDER     'ollama' | 'gemini' | 'groq'   (default 'ollama')
+      VISULEARN_LLM_MODEL        shared model override for any provider
+      VISULEARN_OLLAMA_MODEL     Ollama model       (default llama3.1:8b)
+      VISULEARN_OLLAMA_HOST      Ollama endpoint    (default http://127.0.0.1:11434)
+      VISULEARN_GEMINI_MODEL     Gemini model       (default gemini-2.5-flash)
+      VISULEARN_GROQ_MODEL       Groq model         (default llama-3.3-70b-versatile)
+      GEMINI_API_KEY / GOOGLE_API_KEY   Gemini secrets
+      GROQ_API_KEY               Groq secret
+      VISULEARN_TEMPERATURE      temperature (default 0.4); 0 is a real choice
+      VISULEARN_MAX_OUTPUT_TOKENS   output budget, floored at 4096
+      VISULEARN_TIMEOUT          HTTP timeout seconds (default 300.0)
+    """
+
+    provider: str = "ollama"
+    model: str | None = None
+    host: str | None = None
+    api_key: str | None = None
+    temperature: float = DEFAULT_TEMPERATURE
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    timeout: float = 300.0
+
+def _clamp_output_tokens(value, *, name: str = "VISULEARN_MAX_OUTPUT_TOKENS") -> int:
+    """Return `value` raised to the output-token floor, logging the override.
+
+    A budget below 4096 truncates a full script mid-JSON and mimics a model bug
+    (AGENT.md §9.9), so the floor is non-negotiable. When we overrule the operator
+    we say so rather than silently changing their intent (#22).
+    """
+    value = int(value)
+    if value < MIN_MAX_OUTPUT_TOKENS:
+        log.warning(
+            "%s=%d is below the %d output-token floor - clamping up to prevent "
+            "mid-JSON truncation (AGENT.md §9.9)",
+            name, value, MIN_MAX_OUTPUT_TOKENS,
+        )
+        return MIN_MAX_OUTPUT_TOKENS
+    return value
+
 
 class ProviderError(RuntimeError):
     """A provider call failed in a way the caller should see and act on.
@@ -239,7 +291,7 @@ class OllamaProvider(Provider):
         self.model = model
         self.host = host.rstrip("/")
         self.temperature = temperature
-        self.num_predict = max(MIN_MAX_OUTPUT_TOKENS, int(num_predict))
+        self.num_predict = _clamp_output_tokens(num_predict)
         self.timeout = timeout
         self.session = session or requests.Session()
 
@@ -313,7 +365,7 @@ class GeminiProvider(Provider):
         self.api_key = api_key
         self.model = model
         self.temperature = temperature
-        self.max_output_tokens = max(MIN_MAX_OUTPUT_TOKENS, int(max_output_tokens))
+        self.max_output_tokens = _clamp_output_tokens(max_output_tokens)
         self.timeout = timeout
         self.session = session or requests.Session()
 
@@ -398,7 +450,7 @@ class GroqProvider(Provider):
         self.api_key = api_key
         self.model = model
         self.temperature = temperature
-        self.max_tokens = max(MIN_MAX_OUTPUT_TOKENS, int(max_tokens))
+        self.max_tokens = _clamp_output_tokens(max_tokens)
         self.timeout = timeout
         self.session = session or requests.Session()
 
@@ -448,43 +500,43 @@ class GroqProvider(Provider):
         )
 
 
-def _build_ollama(cfg: dict, _float, _int) -> Provider:
+def _build_ollama(cfg: ProviderConfig) -> Provider:
     return OllamaProvider(
-        model=(cfg.get("model")
-               or os.getenv("VISULEARN_LLM_MODEL")
-               or os.getenv("VISULEARN_OLLAMA_MODEL")
-               or "llama3.1:8b"),
-        host=cfg.get("host") or os.getenv("VISULEARN_OLLAMA_HOST", "http://127.0.0.1:11434"),
-        temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
-        num_predict=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+        model=cfg.model or os.getenv("VISULEARN_OLLAMA_MODEL") or "llama3.1:8b",
+        host=cfg.host or os.getenv("VISULEARN_OLLAMA_HOST", "http://127.0.0.1:11434"),
+        temperature=cfg.temperature,
+        num_predict=cfg.max_output_tokens,
+        timeout=cfg.timeout,
     )
 
 
-def _build_gemini(cfg: dict, _float, _int) -> Provider:
-    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+def _build_gemini(cfg: ProviderConfig) -> Provider:
+    key = cfg.api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not key:
         raise ProviderError("Gemini selected but no key - set GEMINI_API_KEY or GOOGLE_API_KEY.")
     return GeminiProvider(
         api_key=key,
-        model=cfg.get("model") or os.getenv("VISULEARN_GEMINI_MODEL", "gemini-2.5-flash"),
-        temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
-        max_output_tokens=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+        model=cfg.model or os.getenv("VISULEARN_GEMINI_MODEL", "gemini-2.5-flash"),
+        temperature=cfg.temperature,
+        max_output_tokens=cfg.max_output_tokens,
+        timeout=cfg.timeout,
     )
 
 
-def _build_groq(cfg: dict, _float, _int) -> Provider:
-    key = os.getenv("GROQ_API_KEY")
+def _build_groq(cfg: ProviderConfig) -> Provider:
+    key = cfg.api_key or os.getenv("GROQ_API_KEY")
     if not key:
         raise ProviderError("Groq selected but no key - set GROQ_API_KEY.")
     return GroqProvider(
         api_key=key,
-        model=cfg.get("model") or os.getenv("VISULEARN_GROQ_MODEL", "llama-3.3-70b-versatile"),
-        temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
-        max_tokens=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+        model=cfg.model or os.getenv("VISULEARN_GROQ_MODEL", "llama-3.3-70b-versatile"),
+        temperature=cfg.temperature,
+        max_output_tokens=cfg.max_output_tokens,
+        timeout=cfg.timeout,
     )
 
 
-_PROVIDER_BUILDERS: dict[str, Callable[..., Provider]] = {
+_PROVIDER_BUILDERS: dict[str, Callable[[ProviderConfig], Provider]] = {
     "ollama": _build_ollama,
     "gemini": _build_gemini,
     "groq": _build_groq,
@@ -518,28 +570,51 @@ def _load_dotenv(path: Path | None = None) -> None:
 def build_provider(config: dict | None = None) -> Provider:
     """Factory selecting a provider from env/config. Ollama is the batch default.
 
-    Uses a provider-name -> builder registry (dict dispatch) instead of an if/else
-    ladder. Runs the dependency-free .env loader first so local configuration under
-    `<REPO_ROOT>/.env` (e.g. VISULEARN_LLM_MODEL) takes effect. Real env vars win.
+    Reads a `config` dict (indexed by `VISULEARN_*` env-var name) then the environment,
+    resolving into a `ProviderConfig` (its docstring documents every key). The `_UNSET`
+    sentinel distinguishes "not configured" from a genuine falsy value, so an explicit
+    `VISULEARN_TEMPERATURE=0` is honoured instead of falling back. Timeout comes from
+    `VISULEARN_TIMEOUT` (default 300s). Runs the dependency-free .env loader first so
+    local config under `<REPO_ROOT>/.env` takes effect; real env vars win.
     """
     _load_dotenv()
     cfg = config or {}
-    provider = (cfg.get("provider") or os.getenv("VISULEARN_LLM_PROVIDER", "ollama")).lower()
+
+    def _raw(name: str):
+        return cfg[name] if name in cfg else os.getenv(name, _UNSET)
+
+    def _str(name: str, default: str) -> str:
+        raw = _raw(name)
+        return str(raw) if raw is not _UNSET else default
 
     def _float(name: str, default: float) -> float:
-        raw = cfg.get(name) or os.getenv(name)
-        return float(raw) if raw is not None else default
+        raw = _raw(name)
+        return float(raw) if raw is not _UNSET else default
 
     def _int(name: str, default: int) -> int:
-        raw = cfg.get(name) or os.getenv(name)
-        return int(raw) if raw is not None else default
+        raw = _raw(name)
+        return int(raw) if raw is not _UNSET else default
 
-    builder = _PROVIDER_BUILDERS.get(provider)
+    model = cfg["model"] if "model" in cfg else _raw("VISULEARN_LLM_MODEL")
+    host = cfg["host"] if "host" in cfg else _raw("VISULEARN_OLLAMA_HOST")
+    api_key = _raw("GEMINI_API_KEY")
+
+    pcfg = ProviderConfig(
+        provider=_str("VISULEARN_LLM_PROVIDER", "ollama").lower(),
+        model=str(model) if model is not _UNSET else None,
+        host=str(host) if host is not _UNSET else None,
+        api_key=str(api_key) if api_key is not _UNSET else None,
+        temperature=_float("VISULEARN_TEMPERATURE", DEFAULT_TEMPERATURE),
+        max_output_tokens=_int("VISULEARN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+        timeout=_float("VISULEARN_TIMEOUT", 300.0),
+    )
+
+    builder = _PROVIDER_BUILDERS.get(pcfg.provider)
     if builder is None:
         raise ProviderError(
-            f"Unknown VISULEARN_LLM_PROVIDER={provider!r} (use ollama, gemini, or groq)."
+            f"Unknown VISULEARN_LLM_PROVIDER={pcfg.provider!r} (use ollama, gemini, or groq)."
         )
-    return builder(cfg, _float, _int)
+    return builder(pcfg)
 
 
 # --------------------------------------------------------------------------- #

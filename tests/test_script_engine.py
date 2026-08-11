@@ -246,3 +246,24 @@ def test_load_dotenv_sets_model(monkeypatch, tmp_path):
     _load_dotenv(dotenv)
     assert os.environ["VISULEARN_LLM_MODEL"] == "foo:bar"
     assert os.environ["VISULEARN_OLLAMA_HOST"] == "http://1.2.3.4:11434"
+
+
+def test_build_provider_honours_temperature_zero(monkeypatch):
+    """temperature=0 must reach the provider; the old `or` swallowed it as 'unset'."""
+    monkeypatch.setattr("script_engine._load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("VISULEARN_TEMPERATURE", "0")
+    assert build_provider().temperature == 0.0
+
+
+def test_build_provider_reads_timeout_env(monkeypatch):
+    monkeypatch.setattr("script_engine._load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("VISULEARN_TIMEOUT", "120")
+    assert build_provider().timeout == 120.0
+
+
+def test_clamp_output_tokens_logs_the_override(caplog):
+    with caplog.at_level(logging.WARNING, logger="visulearn.script_engine"):
+        p = OllamaProvider(num_predict=100)
+    assert p.num_predict == 4096
+    assert "clamping" in caplog.text
+
