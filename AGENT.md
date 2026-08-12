@@ -266,3 +266,64 @@ Ollama). No stage emits unvalidated JSON.
     accept different schema subsets — adapt the outbound schema per provider, never the model (§3).
 11. **Qwen3 thinking mode**: use the Instruct (non-thinking) variant for JSON; reasoning traces
     waste tokens and add nothing under grammar-constrained decoding.
+
+---
+
+## 10. Evaluation
+
+The pipeline already contains its own evaluators — `Script.model_validate_json` (schema
+conformance) and `engine_gate_errors` (production rules). Evaluation here means running
+those same checks as a **scored suite over a fixed topic set**, so "which free model is
+good enough for the Script Engine" is answered with a number instead of a vibe.
+
+Scope: **deterministic, code-based eval only.** No LLM-as-judge — it reintroduces the
+cost/quota problem (§1.1), is non-deterministic so it can't gate anything, and adds a
+second model to trust. Factual correctness is covered by cheap substring fact-checks and
+by the Research Agent's grounding, not by a judge.
+
+Lives in `eval/`, separate from `tests/`:
+
+- `eval/topics.yml` — the dataset: ~10 topics (3 easy / 4 medium / 3 hard), each with:
+    - `expected_facts` — a list of **OR-groups**. A group passes if *any* member appears in
+      the narration; the topic passes facts only if *every* group passes. This encodes
+      "any phrasing is fine" (OR within a group) vs "these concepts are all required"
+      (AND across groups): e.g. `[["order log n","logarithmic"], ["sorted"]]`. A bare string
+      is a 1-member group. **Do not use a flat synonym list** — under the required-all check
+      that makes synonyms *stricter*, not looser, and false-fails good scripts.
+    - `forbidden_facts` (optional) — terms that signal drift into a *confusable* topic
+      (AVL "balance factor" in a Red-Black script, "family of products" in a Factory Method
+      script). Kept conservative because contrastive teaching can legitimately mention them.
+- `eval/run_eval.py` — loops models × topics, makes ONE call per pair (no repair), scores
+  with the **same** `engine_gate_errors` the pipeline uses, and emits a table:
+  `parse% / gate% / facts% / drift-ok% / latency` per model.
+
+**Two scoring tiers, and they are NOT equal:**
+- `gate%` (structural + production rules via `engine_gate_errors`) is the real bar and the
+  **model-selection signal** — first-try, no repair, so it's the inverse of how often the
+  production repair loop must fire.
+- `facts%` and `drift-ok%` are **REVIEW FLAGS, not gates.** They inform a human review;
+  they never block the pipeline and a wrong fact must NOT flip `gate_pass`. Because
+  contrastive teaching ("unlike AVL's balance factor…") can trip a forbidden term, a
+  flagged script is *looked at*, not rejected.
+
+**Why single-call, no-repair:** first-try `gate%` is the *unmasked* model quality. The
+repair loop would paper over a weak model; `gate%` is the inverse of "how often the repair
+loop must fire," so a low number means the model leans on repair and is the weaker pick
+even when it eventually passes. That is the number that decides gemma3:4b vs qwen3:8b vs
+qwen3:14b.
+
+**Rules:**
+- Eval is a **separate command**, NOT part of `pytest` — it's slow and model-dependent, so
+  it must not gate every commit. Run it when choosing a model or before a release.
+- The *scoring functions* (`score_output`, `_normalize_groups`) ARE unit-tested without an
+  LLM in `tests/test_eval.py` (fed the RBT fixture). The *runner* needs a live local model
+  and stays out of CI.
+- Reuse `engine_gate_errors` — never re-implement the gate inside eval, or the two versions
+  will disagree and the eval becomes a lie. Likewise, `forbidden_facts`/`expected_facts`
+  keys the scorer doesn't read would be silently ignored — keep schema and scorer in step.
+- `eval/` needs `pyyaml`; add it to dev requirements, not the core install.
+
+Run:
+```bash
+python eval/run_eval.py --models qwen3:8b qwen3:14b gemma3:4b
+```

@@ -1,0 +1,90 @@
+# Evaluation dataset for the Script Engine. See AGENT.md §10.
+#
+# 10 topics (3 easy / 4 medium / 3 hard), mixing dsa and design_pattern.
+# Narration is TTS-normalized, so match spoken forms: "order log n", not "O(log n)".
+#
+# expected_facts: list of OR-GROUPS. Each group is satisfied if ANY of its members
+#   appears in the narration; the topic passes facts only if EVERY group is satisfied.
+#   This separates "must convey this concept" (across groups = AND) from "any of these
+#   phrasings is fine" (within a group = OR). A bare string is shorthand for a 1-member
+#   group. Example: [["order log n", "logarithmic"], ["sorted"]] means the script must
+#   convey the log-n complexity (either phrasing) AND mention sorted input.
+#
+# forbidden_facts: flat list of terms that signal the model has drifted into a
+#   CONFUSABLE topic (AVL vs Red-Black, Factory vs Abstract Factory). Kept conservative
+#   because contrastive teaching ("unlike AVL's balance factor...") can trip it -- which is
+#   why facts/drift are REVIEW FLAGS, not gates (they never block the pipeline).
+
+- topic: "Binary Search"
+  category: dsa
+  difficulty: easy
+  expected_facts:
+    - ["order log n", "logarithmic"]
+    - ["sorted"]
+
+- topic: "Stack"
+  category: dsa
+  difficulty: easy
+  expected_facts:
+    - ["order one", "constant time"]
+    - ["lifo", "last in", "last-in"]
+
+- topic: "Singleton"
+  category: design_pattern
+  difficulty: easy
+  expected_facts:
+    - ["one instance", "single instance", "only one"]
+
+- topic: "Hash Table"
+  category: dsa
+  difficulty: medium
+  expected_facts:
+    - ["order one", "constant time", "order n"]   # average OR worst-case, both correct
+    - ["collision"]
+
+- topic: "Merge Sort"
+  category: dsa
+  difficulty: medium
+  expected_facts:
+    - ["order n log n"]
+    - ["divide"]
+    - ["conquer", "merge"]
+
+- topic: "Observer"
+  category: design_pattern
+  difficulty: medium
+  expected_facts:
+    - ["subscrib", "observer"]
+    - ["notif"]
+
+- topic: "Factory Method"
+  category: design_pattern
+  difficulty: medium
+  expected_facts:
+    - ["subclass"]
+    - ["product"]
+    - ["defer", "decide"]
+  forbidden_facts: ["family of products"]         # Abstract Factory drift
+
+- topic: "Red-Black Tree"
+  category: dsa
+  difficulty: hard
+  expected_facts:
+    - ["order log n"]
+    - ["order n"]
+  forbidden_facts: ["balance factor"]             # AVL drift
+
+- topic: "Dijkstra's Algorithm"
+  category: dsa
+  difficulty: hard
+  expected_facts:
+    - ["shortest"]
+    - ["priority queue", "min-heap", "min heap", "array"]   # heap OR O(V^2) array form
+
+- topic: "Visitor Pattern"
+  category: design_pattern
+  difficulty: hard
+  expected_facts:
+    - ["double dispatch", "double-dispatch"]
+    - ["element"]
+    - ["accept"]
