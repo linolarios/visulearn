@@ -35,6 +35,7 @@ DEFAULT_SYSTEM_PROMPTS = {
     "design_pattern": REPO_ROOT / "config" / "prompts" / "design_pattern_system_prompt.txt",
 }
 
+
 # A compliant 8-12 segment script needs a generous output budget. Never go below 4096:
 # truncation is exactly the failure mode that produced "no JSON object found" upstream.
 MIN_MAX_OUTPUT_TOKENS = 4096
@@ -53,6 +54,29 @@ _sleep = time.sleep  # indirection so tests can run the backoff path instantly
 # temperature=0. The old `cfg.get(name) or os.getenv(name)` could not represent an
 # explicit 0, silently falling back to DEFAULT_TEMPERATURE (#20 / #22).
 _UNSET = object()
+
+OUTPUT_SCRIPTS_DIR = REPO_ROOT / "output" / "scripts" # raw drafts persisted here
+
+
+def _safe_topic(topic: str) -> str:
+    """Filesystem-safe slug for a topic (spaces/path separators -> underscores)."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", topic.strip()).strip("_") or "topic"
+
+
+def _write_raw(topic: str, raw: str, *, suffix: str) -> Path | None:
+    """Best-effort persist of `raw` to output/scripts/<topic><suffix>.json.
+
+    Returns the path, or None on any error so a write failure can never break
+    generation (Golden Rule 4: fail-soft).
+    """
+    try:
+        OUTPUT_SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = OUTPUT_SCRIPTS_DIR / f"{_safe_topic(topic)}{suffix}.json"
+        path.write_text(raw)
+        return path
+    except OSError as exc:
+        log.warning("could not persist raw script artifact for %r: %s", topic, exc)
+        return None
 
 
 @dataclass(frozen=True)
@@ -653,20 +677,31 @@ def generate_script(
     script, problems = _validate(response.text)
     problems = _with_truncation_problem(problems, response)
 
-    if problems and attempts <= MAX_REPAIR_ATTEMPTS:
-        log.warning("script invalid, attempting one repair (%d): %s", attempts, problems)
+    # Real repair loop, bounded by MAX_REPAIR_ATTEMPTS (Golden Rule 1 = exactly one
+    # repair). A `while` (not `if`) keeps the bound in one obvious place; the FakeProvider
+    # test enforces we never exceed it no matter how many outputs are available.
+    while problems and attempts <= MAX_REPAIR_ATTEMPTS:
+        # Persist + log the rejected draft BEFORE re-asking, so a crash in the repair
+        # path can't lose the only evidence of what the model produced (#6).
+        log.warning("script invalid on attempt %d/%d; rejected draft:\n%s",
+                    attempts, MAX_REPAIR_ATTEMPTS, response.text)
+        draft_path = _write_raw(topic, response.text, suffix=f".repair{attempts}.raw")
+        if draft_path:
+            log.warning("persisted rejected draft to %s", draft_path)
         repair = _repair_messages(messages, response.text, problems)
-        # Distinct context (the rejected draft + the errors), not a blind identical retry.
         response = _as_response(prov.complete(repair, adapted))
         attempts += 1
         script, problems = _validate(response.text)
         problems = _with_truncation_problem(problems, response)
 
     if problems or script is None:
+        raw_path = _write_raw(topic, response.text, suffix=".raw")
         log.error(
             "script engine hard-fail after %d attempt(s). raw output follows:\n%s",
             attempts, response.text,
         )
+        if raw_path:
+            log.error("raw output also written to %s", raw_path)
         raise ScriptEngineError(
             "script engine could not produce valid output after "
             f"{attempts} attempt(s): {problems}"

@@ -14,6 +14,10 @@ from pathlib import Path
 
 import pytest
 
+import script_engine  # for monkeypatching module-level OUTPUT_SCRIPTS_DIR
+
+from models import Script, canonical_schema
+
 from models import Script, canonical_schema
 from script_engine import (
     GeminiProvider,
@@ -266,4 +270,30 @@ def test_clamp_output_tokens_logs_the_override(caplog):
         p = OllamaProvider(num_predict=100)
     assert p.num_predict == 4096
     assert "clamping" in caplog.text
+
+def test_repair_loop_is_bounded_not_runaway(schema):
+    """A 3rd output is available, but MAX_REPAIR_ATTEMPTS=1 must still stop at 2 calls."""
+    fake = FakeProvider([_gate_invalid_copy(), _gate_invalid_copy(), VALID_SCRIPT])
+    with pytest.raises(ScriptEngineError):
+        generate_script("Stack", {}, provider=fake, schema=schema)
+    assert fake.call_count == 2
+
+
+def test_hard_fail_persists_raw_artifact(monkeypatch, tmp_path, schema):
+    fake = FakeProvider([_gate_invalid_copy(), _gate_invalid_copy()])
+    monkeypatch.setattr(script_engine, "OUTPUT_SCRIPTS_DIR", tmp_path)
+    with pytest.raises(ScriptEngineError):
+        generate_script("Stack", {}, provider=fake, schema=schema)
+    artifact = tmp_path / "Stack.raw.json"
+    assert artifact.exists()
+    assert _gate_invalid_copy() in artifact.read_text()
+
+
+def test_rejected_draft_persisted_before_repair(monkeypatch, tmp_path, schema):
+    fake = FakeProvider([_gate_invalid_copy(), VALID_SCRIPT])
+    monkeypatch.setattr(script_engine, "OUTPUT_SCRIPTS_DIR", tmp_path)
+    script = generate_script("Red-Black Tree", {}, provider=fake, schema=schema)
+    assert len(script.segments) == 11
+    assert (tmp_path / "Red-Black_Tree.repair1.raw.json").exists()
+
 
