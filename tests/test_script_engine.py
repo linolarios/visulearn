@@ -28,6 +28,7 @@ from script_engine import (
     ProviderResponse,
     ScriptEngineError,
     _load_dotenv,
+    _inline_schema,
     _normalize_finish_reason,
     _truncation_hint,
     build_provider,
@@ -36,7 +37,11 @@ from script_engine import (
 
 FIXTURE = Path(__file__).parent / "fixtures" / "rbt_script.json"
 VALID_SCRIPT = FIXTURE.read_text()  # 11 segments, opens title_card, closes, passes the gate
-
+GEMINI_KEYS = {
+    "type", "title", "description", "properties", "required", "items", "enum",
+    "format", "minimum", "maximum", "minItems", "maxItems", "additionalProperties",
+    "prefixItems", "anyOf", "oneOf", "allOf",
+}
 
 class FakeProvider(Provider):
     """Stubbed LLM: returns queued raw strings, counts calls, never touches the network."""
@@ -316,3 +321,45 @@ def test_gate_rejects_topic_and_category_mismatch():
     assert "topic mismatch" in joined and "Binary Heap" in joined
     assert "category mismatch" in joined and "design_pattern" in joined
 
+
+
+def test_inline_schema_recurse_unions_and_additional_properties():
+    schema = {
+        "$defs": {
+            "Leaf": {"type": "object", "properties": {"x": {"type": "integer"}}},
+        },
+        "type": "object",
+        "properties": {
+            "a": {"anyOf": [{"$ref": "#/$defs/Leaf"}, {"type": "null"}]},
+            "b": {"oneOf": [{"$ref": "#/$defs/Leaf"}, {"type": "string"}]},
+            "c": {"allOf": [{"$ref": "#/$defs/Leaf"}]},
+            "extra": {"type": "object", "additionalProperties": {"$ref": "#/$defs/Leaf"}},
+        },
+    }
+    out = _inline_schema(schema, schema["$defs"], supported=GEMINI_KEYS)
+    assert "$defs" not in out
+    assert out["properties"]["a"]["anyOf"][0]["properties"]["x"] == {"type": "integer"}
+    assert out["properties"]["b"]["oneOf"][0]["properties"]["x"] == {"type": "integer"}
+    assert out["properties"]["c"]["allOf"][0]["properties"]["x"] == {"type": "integer"}
+    assert out["properties"]["extra"]["additionalProperties"]["properties"]["x"] == {"type": "integer"}
+
+
+def test_inline_schema_missing_defs_raises_provider_error():
+    with pytest.raises(ProviderError, match=r"undefined \$defs"):
+        _inline_schema(
+            {"$ref": "#/$defs/Missing"}, {},
+            supported={"type", "properties", "items", "additionalProperties",
+                       "prefixItems", "anyOf", "oneOf", "allOf"},
+        )
+
+
+def test_inline_schema_cycle_guard_returns_shallow_ref():
+    schema = {
+        "$defs": {
+            "A": {"type": "object", "properties": {"b": {"$ref": "#/$defs/B"}}},
+            "B": {"properties": {"a": {"$ref": "#/$defs/A"}}},
+        },
+        "$ref": "#/$defs/A",
+    }
+    out = _inline_schema(schema, schema["$defs"], supported=GEMINI_KEYS)
+    assert out["properties"]["b"]["properties"]["a"]["$ref"] == "#/$defs/A"

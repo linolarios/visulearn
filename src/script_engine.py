@@ -108,7 +108,6 @@ class ProviderConfig:
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     timeout: float = 300.0
 
-
 def _clamp_output_tokens(value, *, name: str = "VISULEARN_MAX_OUTPUT_TOKENS") -> int:
     """Return `value` raised to the output-token floor, logging the override.
 
@@ -676,8 +675,8 @@ def generate_script(
     response = _as_response(prov.complete(messages, adapted))
     attempts += 1
     script, problems = _validate(
-        response.text, expected_topic=topic, expected_category=category
-    )
+            response.text, expected_topic=topic, expected_category=category
+        )
     problems = _with_truncation_problem(problems, response)
 
     # Real repair loop, bounded by MAX_REPAIR_ATTEMPTS (Golden Rule 1 = exactly one
@@ -694,9 +693,7 @@ def generate_script(
         repair = _repair_messages(messages, response.text, problems)
         response = _as_response(prov.complete(repair, adapted))
         attempts += 1
-        script, problems = _validate(
-            response.text, expected_topic=topic, expected_category=category
-        )
+        script, problems = _validate(response.text)
         problems = _with_truncation_problem(problems, response)
 
     if problems or script is None:
@@ -798,27 +795,57 @@ def _truncation_hint(raw: str, finish_reason: str = "") -> str:
     return ""
 
 
-def _inline_schema(node, defs: dict, *, supported: set[str]) -> dict:
-    """Recursively inline $ref -> $defs and drop keywords not in `supported` (Gemini)."""
+def _inline_schema(node, defs: dict, *, supported: set[str],
+                   _seen: frozenset[str] = frozenset()) -> dict:
+    """Recursively inline $ref -> $defs and drop keywords not in `supported` (Gemini).
+
+    Recurse through every schema-shaped keyword — `properties`, `items`,
+    `additionalProperties`, and the `anyOf`/`oneOf`/`allOf`/`prefixItems` unions — so a
+    $ref buried anywhere is flattened, not just at the top level (#11/#12). Recursion is
+    orthogonal to the `supported` whitelist: a union keyword still requires both the
+    recursion here AND membership in `_SUPPORTED_KEYS` to survive for Gemini.
+
+    A `$ref` whose target is missing from `$defs` raises `ProviderError` (a stale schema,
+    never a silent drop) and a `$ref` cycle (A -> B -> A) is cut with a shallow
+    `{"$ref": ...}` marker instead of recursing forever (#14). The immutable `_seen` set
+    tracks only the current expansion chain, so siblings may re-inline the same
+    definition without a false cycle.
+    """
     if not isinstance(node, dict):
         return node
     ref = node.get("$ref")
     if ref and ref.startswith("#/$defs/"):
         name = ref[len("#/$defs/"):]
-        frag = defs[name]
-        return _inline_schema(frag, defs, supported=supported)
+        if name not in defs:
+            raise ProviderError(
+                f"Gemini schema references undefined $defs[{name!r}] "
+                f"(available: {sorted(defs)}) — schema is stale; rerun scripts/generate_schema.py"
+            )
+        if name in _seen:
+            # Cycle reached: stop expanding. A shallow $ref keeps the structure finite
+            # instead of RecursionError.
+            return {"$ref": ref}
+        return _inline_schema(
+            defs[name], defs, supported=supported, _seen=_seen | {name}
+        )
     out: dict = {}
     for key, value in node.items():
         if key == "$defs":
             continue
         if key not in supported:
             continue
-        if key == "properties":
-            out[key] = {k: _inline_schema(v, defs, supported=supported) for k, v in value.items()}
-        elif key == "items":
-            out[key] = _inline_schema(value, defs, supported=supported)
-        elif key == "prefixItems" and isinstance(value, list):
-            out[key] = [_inline_schema(v, defs, supported=supported) for v in value]
+        if key == "properties" and isinstance(value, dict):
+            out[key] = {
+                k: _inline_schema(v, defs, supported=supported, _seen=_seen)
+                for k, v in value.items()
+            }
+        elif isinstance(value, list) and key in ("prefixItems", "anyOf", "oneOf", "allOf"):
+            out[key] = [
+                _inline_schema(v, defs, supported=supported, _seen=_seen) for v in value
+            ]
+        elif isinstance(value, dict) and key in ("items", "additionalProperties"):
+            out[key] = _inline_schema(value, defs, supported=supported, _seen=_seen)
         else:
             out[key] = value
     return out
+
