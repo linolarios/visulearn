@@ -108,6 +108,7 @@ class ProviderConfig:
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     timeout: float = 300.0
 
+
 def _clamp_output_tokens(value, *, name: str = "VISULEARN_MAX_OUTPUT_TOKENS") -> int:
     """Return `value` raised to the output-token floor, logging the override.
 
@@ -674,7 +675,9 @@ def generate_script(
     attempts = 0
     response = _as_response(prov.complete(messages, adapted))
     attempts += 1
-    script, problems = _validate(response.text)
+    script, problems = _validate(
+        response.text, expected_topic=topic, expected_category=category
+    )
     problems = _with_truncation_problem(problems, response)
 
     # Real repair loop, bounded by MAX_REPAIR_ATTEMPTS (Golden Rule 1 = exactly one
@@ -691,7 +694,9 @@ def generate_script(
         repair = _repair_messages(messages, response.text, problems)
         response = _as_response(prov.complete(repair, adapted))
         attempts += 1
-        script, problems = _validate(response.text)
+        script, problems = _validate(
+            response.text, expected_topic=topic, expected_category=category
+        )
         problems = _with_truncation_problem(problems, response)
 
     if problems or script is None:
@@ -729,12 +734,21 @@ def _with_truncation_problem(problems: list[str], response: ProviderResponse) ->
     return problems
 
 
-def _validate(raw: str) -> tuple[Script | None, list[str]]:
+def _validate(
+    raw: str,
+    *,
+    expected_topic: str | None = None,
+    expected_category: str | None = None,
+) -> tuple[Script | None, list[str]]:
     try:
         script = Script.model_validate_json(raw)
     except Exception as e:  # noqa: BLE001 - surface any parse/validation issue to the repair loop
         return None, [f"structural: {e}"]
-    return script, engine_gate_errors(script)
+    return script, engine_gate_errors(
+        script,
+        expected_topic=expected_topic,
+        expected_category=expected_category,
+    )
 
 
 def _repair_messages(messages: list[dict], raw: str, problems: list[str]) -> list[dict]:

@@ -16,9 +16,9 @@ import pytest
 
 import script_engine  # for monkeypatching module-level OUTPUT_SCRIPTS_DIR
 
-from models import Script, canonical_schema
 
-from models import Script, canonical_schema
+from models import Script, canonical_schema, engine_gate_errors
+
 from script_engine import (
     GeminiProvider,
     GroqProvider,
@@ -296,4 +296,23 @@ def test_rejected_draft_persisted_before_repair(monkeypatch, tmp_path, schema):
     assert len(script.segments) == 11
     assert (tmp_path / "Red-Black_Tree.repair1.raw.json").exists()
 
+def test_structural_failure_also_repairs_then_valid(schema):
+    # First output is not even JSON -> structural failure; repair returns a valid script.
+    fake = FakeProvider(["this is prose, not JSON", VALID_SCRIPT])
+    script = generate_script("Red-Black Tree", {}, provider=fake, schema=schema)
+    assert isinstance(script, Script)
+    assert fake.call_count == 2
+
+def test_gate_rejects_topic_and_category_mismatch():
+    rbt = json.loads(FIXTURE.read_text())
+    rbt["meta"]["topic"] = "Binary Heap"          # off-topic
+    rbt["meta"]["category"] = "design_pattern"    # wrong category, structural-valid enum
+    errs = engine_gate_errors(
+        Script.model_validate(rbt),
+        expected_topic="Red-Black Tree",
+        expected_category="dsa",
+    )
+    joined = " ".join(errs)
+    assert "topic mismatch" in joined and "Binary Heap" in joined
+    assert "category mismatch" in joined and "design_pattern" in joined
 

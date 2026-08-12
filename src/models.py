@@ -225,13 +225,22 @@ def canonical_schema() -> dict:
 
 
 def engine_gate_errors(
-    script: Script, *, min_segments: int = 8, max_segments: int = 12
+    script: Script,
+    *,
+    min_segments: int = 8,
+    max_segments: int = 12,
+    expected_topic: str | None = None,
+    expected_category: str | None = None,
 ) -> list[str]:
     """Production gate for the Script Engine. Returns human-readable errors (empty == pass).
 
     These are the strings you feed back into a single repair attempt. They are business
     rules layered on top of structural validation, not type invariants — so the `Script`
     type itself stays reusable for short-form or test scripts.
+
+    `expected_topic` / `expected_category`, when provided, reject a Script that is about
+    a different topic (or wrong category) than the one requested (#8) — the model must
+    stay on-topic; a hallucinated subject is a repair-able failure, not an accepted script.
     """
     errors: list[str] = []
 
@@ -256,7 +265,20 @@ def engine_gate_errors(
     if VisualCue.CLOSING not in cues:
         errors.append("no closing segment — every explainer ends on one")
 
+    # On-topic / on-category gate: the model must answer the question asked (#8).
+    if expected_topic is not None and (
+        script.meta.topic.strip().lower() != expected_topic.strip().lower()
+    ):
+        errors.append(
+            f"topic mismatch: script is about {script.meta.topic!r}, expected {expected_topic!r}"
+        )
+    if expected_category is not None and script.meta.category.value != expected_category:
+        errors.append(
+            f"category mismatch: script is {script.meta.category.value!r}, expected {expected_category!r}"
+        )
+
     return errors
+
 
 
 def build_storyboard(script: Script) -> Storyboard:
