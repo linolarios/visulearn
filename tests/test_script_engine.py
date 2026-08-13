@@ -163,6 +163,11 @@ def test_gemini_adapt_schema_inlines_and_strips(schema):
     assert meta["properties"]["category"]["enum"]      # was a $ref -> Category, now inlined
     assert "required" in meta and "topic" in meta["required"]
     assert p.max_output_tokens >= 4096
+    # code_template -> additionalProperties:{type:string} is a documented Gemini
+    # construct and must survive adaptation; it stays in the payload (task 9).
+    ct = out["properties"]["code_template"]
+    assert ct["additionalProperties"] == {"type": "string"}
+
     # The canonical model must still validate the fixture (source of truth unchanged).
     Script.model_validate_json(VALID_SCRIPT)
 

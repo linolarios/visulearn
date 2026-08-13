@@ -370,6 +370,12 @@ class OllamaProvider(Provider):
 class GeminiProvider(Provider):
     name = "gemini"
 
+    # Gemini responseSchema supported-subset, verified against docs (updated
+    # 2026-07-30): https://ai.google.dev/gemini-api/docs/structured-output
+    # This set exactly matches what Gemini accepts — do NOT add keywords it does not
+    # document (e.g. anyOf/oneOf/allOf stay out until a live call proves them, §9.10).
+    # `additionalProperties` may be a boolean OR a schema, which is what lets
+    # `code_template` (dict[str,str]) survive the whitelist & _inline_schema recursion.
     _SUPPORTED_KEYS = {
         "type", "title", "description", "properties", "required", "items",
         "enum", "format", "minimum", "maximum", "minItems", "maxItems",
@@ -396,6 +402,12 @@ class GeminiProvider(Provider):
     def adapt_schema(self, schema: dict) -> dict:
         """Inline $defs/$ref and drop keywords Gemini's responseSchema does not support."""
         defs = schema.get("$defs", {})
+        # DECISION (#13): keep `code_template` (dict[str,str]) in the payload. It
+        # serializes to `additionalProperties: {type: string}`, which Gemini's docs
+        # explicitly allow ("additionalProperties ... Can be a boolean or a schema").
+        # Mocked tests can't prove acceptance -> a single live call is the remaining
+        # gate (AGENT.md §3/§9.10). Until then the Gemini path is "unverified";
+        # local Ollama (raw schema) is the batch default.
         return _inline_schema(schema, defs, supported=self._SUPPORTED_KEYS)
 
     @staticmethod
