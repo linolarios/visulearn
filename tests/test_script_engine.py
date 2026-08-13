@@ -31,6 +31,7 @@ from script_engine import (
     _inline_schema,
     _normalize_finish_reason,
     _truncation_hint,
+    _build_messages,
     build_provider,
     generate_script,
 )
@@ -368,3 +369,36 @@ def test_inline_schema_cycle_guard_returns_shallow_ref():
     }
     out = _inline_schema(schema, schema["$defs"], supported=GEMINI_KEYS)
     assert out["properties"]["b"]["properties"]["a"]["$ref"] == "#/$defs/A"
+
+    def test_build_messages_unknown_category_raises_value_error():
+        with pytest.raises(ValueError, match="unknown category"):
+            _build_messages("Stack", {}, "quantum", schema={})
+
+
+def test_prompt_uses_canonical_params_use_adapted(schema):
+    """#16 caution: prompt copy is the unadapted canonical; param copy is adapted."""
+    class AdaptingProvider(FakeProvider):
+        def adapt_schema(self, s):
+            adapted = dict(s)
+            adapted["_adapted"] = True
+            return adapted
+    fake = AdaptingProvider([VALID_SCRIPT])
+    generate_script("Red-Black Tree", {}, provider=fake, schema=schema)
+    assert fake.seen_schema[0].get("_adapted") is True          # struct param: adapted
+    user = json.loads(fake.seen_messages[0][-1]["content"])
+    assert "_adapted" not in user["schema"]                     # prompt: canonical/unadapted
+
+
+def test_load_dotenv_strips_quotes_and_inline_comments(monkeypatch, tmp_path):
+    for k in ("VISULEARN_X", "VISULEARN_Y", "VISULEARN_Z"):
+        monkeypatch.delenv(k, raising=False)
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("\n".join([
+        "VISULEARN_X='quoted value'  # inline comment",
+        "VISULEARN_Y=http://host/path#fragment",   # no space before # -> data, kept
+        "VISULEARN_Z=plain",
+    ]))
+    _load_dotenv(dotenv)
+    assert os.environ["VISULEARN_X"] == "quoted value"
+    assert os.environ["VISULEARN_Y"] == "http://host/path#fragment"
+    assert os.environ["VISULEARN_Z"] == "plain"

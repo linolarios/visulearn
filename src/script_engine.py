@@ -580,10 +580,15 @@ _PROVIDER_BUILDERS: dict[str, Callable[[ProviderConfig], Provider]] = {
 
 
 def _load_dotenv(path: Path | None = None) -> None:
-    """Load KEY=VALUE lines from a .env file into the environment (no dependency).
+    """Load KEY=VALUE lines from a .env file into `os.environ` (no dependency).
 
-    Real environment variables always win: keys already present in os.environ are
-    left untouched. Handles an `export` prefix, surrounding quotes, and # comments.
+    SIDE EFFECT: this mutates `os.environ` — it is a loader, not a parser. Real
+    environment variables always win: keys already present are left untouched.
+
+    Handles an `export` prefix, surrounding single/double quotes on the value, and
+    # comments — both full-line `# ...` and inline `key=value  # note`. An inline `#`
+    is treated as a comment only when preceded by whitespace, so a URL fragment
+    (e.g. `http://x/path#section`) is preserved as data.
     """
     path = path or (REPO_ROOT / ".env")
     if not path.is_file():
@@ -597,10 +602,20 @@ def _load_dotenv(path: Path | None = None) -> None:
         if "=" not in line:
             continue
         key, _, val = line.partition("=")
-        key = key.strip()
-        val = val.strip().strip(chr(39) + chr(34)).strip()
+        key = key.strip().strip("'\"").strip()
+        # Inline comment: ` #` or `\t#` starts a comment; a `#` with no preceding
+        # whitespace is data (e.g. a URL fragment) and is kept.
+        for sep in (" #", "\t#"):
+            if sep in val:
+                val = val.split(sep, 1)[0].rstrip()
+                break
+        val = val.strip()
+        # Strip a single matching pair of surrounding quotes ("..." or '...').
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+            val = val[1:-1]
         if key and key not in os.environ:
             os.environ[key] = val
+
 
 
 def build_provider(config: dict | None = None) -> Provider:
@@ -681,7 +696,11 @@ def generate_script(
     if schema is None:
         schema = canonical_schema()
     adapted = prov.adapt_schema(schema)
-    messages = _build_messages(topic, fact_sheet, category, schema=adapted)
+    # The PROMPT shows the unadapted canonical schema (the true contract); the
+    # structured-output PARAM uses the per-provider adapted copy. Two objects —
+    # never put the stripped version in the prompt (under-specifies the model).
+    messages = _build_messages(topic, fact_sheet, category, schema=schema)
+
 
     attempts = 0
     response = _as_response(prov.complete(messages, adapted))
@@ -772,12 +791,14 @@ def _repair_messages(messages: list[dict], raw: str, problems: list[str]) -> lis
 
 
 def _build_messages(
-    topic: str, fact_sheet: dict, category: str, *, schema
+        topic: str, fact_sheet: dict, category: str, *, schema
 ) -> list[dict]:
     prompt_path = DEFAULT_SYSTEM_PROMPTS.get(category)
     if prompt_path is None:
-        raise ProviderError(f"unknown category {category!r}; use 'dsa' or 'design_pattern'")
-    system = prompt_path.read_text()
+        raise ValueError(
+            f"unknown category {category!r}; use 'dsa' or 'design_pattern'"
+        )
+    system = prompt_path.read_text(encoding="utf-8")
     user = json.dumps(
         {"topic": topic, "facts": fact_sheet, "schema": schema}, ensure_ascii=False, indent=2
     )
