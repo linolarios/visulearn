@@ -1,26 +1,32 @@
-"""Pipeline orchestration (front half): Topic -> validated Script JSON + Storyboard.
+"""Pipeline orchestration: Topic -> validated Script JSON + Storyboard + asset PNGs.
 
 Wires the completed stages — Input Gateway, Research Agent, Script Engine, Storyboard
-Generator — behind one callable so the `visulearn.py script` command (AGENT.md §6) and
-future batch runs share the same path. Every LLM/network seam is injected so the
-orchestrator is testable offline with stubs (AGENT.md §7); CI installs only
-pydantic/pytest/requests, so this module avoids heavy renderer/TTS/assembly deps.
+Generator, and the Asset Factory — behind small callables so the `visulearn.py script`
+command (AGENT.md §6) and future batch runs share one path. Every LLM/network/render
+seam is injected or delegable so the orchestrator is testable offline with stubs
+(AGENT.md §7); CI installs only pydantic/pytest/requests/Pillow, so this module avoids
+heavy renderer/TTS/assembly deps.
 
 Seams:
   * script_provider — Script Engine provider object (stub in tests; None -> build_provider).
   * fact_sheet      — dict (used verbatim), callable canonical->dict, or None (research_agent).
   * disambiguate    — input_gateway.normalize_topic provider (None -> reject unknown topics).
+  * render_scene    — asset_factory dispatcher (monkeypatched in tests to count/fail).
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from asset_factory import render_scene
 from input_gateway import normalize_topic
 from research_agent import build_fact_sheet
 from script_engine import generate_script
 from storyboard_generator import plan
 from models import Storyboard
+
+log = logging.getLogger(__name__)
 
 
 def make_script(
@@ -54,3 +60,25 @@ def make_script(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(script.model_dump_json(indent=2))
     return out_path, storyboard
+
+
+def make_assets(storyboard: Storyboard, out_dir: Path, *, force: bool = False) -> dict[int, Path]:
+    """Render every Scene to out_dir/<segment_id>.png (Pillow fail-soft + caching).
+
+    Golden Rule 5 (idempotent cache): an existing non-empty PNG is reused unless
+    force=True. Golden Rule 4 (fail-soft): render_scene already degrades to the Pillow
+    slide; if even that fails for one scene, it is logged and skipped — never a whole-run
+    crash. Deterministic filenames (segment_id) keep re-runs stable for caching.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    assets: dict[int, Path] = {}
+    for scene in storyboard.scenes:
+        path = out_dir / f"{scene.segment_id}.png"
+        if not force and path.exists() and path.stat().st_size > 0:
+            assets[scene.segment_id] = path
+            continue
+        try:
+            assets[scene.segment_id] = render_scene(scene, path)
+        except Exception as exc:  # noqa: BLE001 - fail-soft per scene, never fail-whole
+            log.warning("asset for scene %s failed; skipping: %s", scene.segment_id, exc)
+    return assets
