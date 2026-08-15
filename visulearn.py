@@ -26,6 +26,13 @@ def main() -> int:
     p_video.add_argument("--out", type=Path, required=True)
 
     args = parser.parse_args()
+
+    if args.cmd == "script":
+        from pipeline import make_script
+        path, storyboard = make_script(args.topic, args.out)
+        print(f"script -> {path} ({len(storyboard.scenes)} scenes)")
+        return 0
+
     raise SystemExit(f"'{args.cmd}' not implemented yet — see AGENT.md §4/§6.")
 
 
