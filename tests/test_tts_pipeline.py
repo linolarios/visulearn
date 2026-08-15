@@ -203,6 +203,72 @@ def test_zero_duration_wav_rejected(tmp_path):
 
 # --- config guard ----------------------------------------------------------- #
 
-def test_no_tts_seam_fails_fast_legibly(tmp_path):
-    with pytest.raises(NotImplementedError, match="TTS driver not wired"):
-        synthesize(_script(), tmp_path / "audio")
+def test_default_kokoro_driver_readable_when_missing(tmp_path, monkeypatch):
+    def boom():
+        raise RuntimeError("Kokoro not installed — 'pip install kokoro-onnx' ...")
+
+    monkeypatch.setattr(tts_pipeline, "_import_kokoro", boom)
+
+    with pytest.raises(RuntimeError, match="Kokoro not installed"):
+        synthesize(_script(), tmp_path / "audio")   # tts=None -> default kokoro driver
+
+
+# --- pure kokoro-driver tests ------------------------------------------------- #
+
+def _kokoro_present():
+    try:
+        import kokoro_onnx  # noqa: F401
+        tts_pipeline._require_models(tts_pipeline.resolve_kokoro_model_dir())
+        return True
+    except Exception:
+        return False
+
+
+def test_samples_to_wav_produces_valid_24k_mono():
+    data = tts_pipeline._samples_to_wav([0, 32767, -32768], 24_000)
+    with wave.open(io.BytesIO(data), "rb") as w:
+        assert w.getframerate() == 24_000
+        assert w.getnchannels() == 1
+        assert w.getnframes() == 3
+    assert tts_pipeline._valid_wav(data)
+
+
+def test_samples_to_wav_rejects_wrong_rate():
+    with pytest.raises(ValueError, match="24000"):
+        tts_pipeline._samples_to_wav([0, 1], 22_050)
+
+
+def test_samples_to_wav_rejects_empty():
+    with pytest.raises(ValueError, match="empty"):
+        tts_pipeline._samples_to_wav([], 24_000)
+
+
+def test_resolve_kokoro_model_dir_default(monkeypatch):
+    monkeypatch.delenv("VISULEARN_KOKORO_DIR", raising=False)
+    assert tts_pipeline.resolve_kokoro_model_dir() == tts_pipeline.REPO_ROOT / "assets" / "kokoro"
+
+
+def test_resolve_kokoro_model_dir_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("VISULEARN_KOKORO_DIR", str(tmp_path / "models"))
+    assert tts_pipeline.resolve_kokoro_model_dir() == tmp_path / "models"
+
+
+def test_require_models_missing_reports_readable(tmp_path):
+    with pytest.raises(RuntimeError, match="model files missing"):
+        tts_pipeline._require_models(tmp_path)          # empty dir
+
+
+def test_require_models_missing_dir():
+    with pytest.raises(RuntimeError, match="not found"):
+        tts_pipeline._require_models(Path("/no/such/kokoro"))
+
+
+@pytest.mark.skipif(
+    not _kokoro_present(),
+    reason="requires kokoro-onnx + model files (real synthesis; not in CI)",
+)
+def test_kokoro_driver_synthesizes_valid_wav():
+    synth = tts_pipeline._kokoro_driver()
+    data = synth("Hello world.")
+    assert tts_pipeline._valid_wav(data)
+

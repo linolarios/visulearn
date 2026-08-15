@@ -6,6 +6,7 @@ Pillow renderers run, so PNGs are genuinely produced; no network, no MoviePy/ffm
 """
 import io
 import wave
+import tts_pipeline
 from pathlib import Path
 
 import pytest
@@ -102,11 +103,19 @@ def test_make_video_reuse_is_idempotent(tmp_path):
     assert calls[0] == n             # audio reused too
 
 
-def test_make_video_missing_tts_fails_fast(tmp_path):
+def test_make_video_missing_tts_fails_fast(tmp_path, monkeypatch):
+    def boom():
+        raise RuntimeError("Kokoro not installed — 'pip install kokoro-onnx' ...")
+
+    monkeypatch.setattr(tts_pipeline, "_import_kokoro", boom)
     provider = _FakeScriptProvider([VALID])
-    with pytest.raises(NotImplementedError, match="TTS driver not wired"):
-        pipeline.make_video("Red-Black Tree", tmp_path, video_name="rbt",
-                            script_provider=provider, tts=None, encoder=_Recorder())
+
+    with pytest.raises(RuntimeError, match="Kokoro not installed"):
+        pipeline.make_video(
+            "Red-Black Tree", tmp_path, video_name="rbt",
+            script_provider=provider, tts=None, encoder=_Recorder(),
+        )
+
 
 
 def test_make_video_injected_fact_sheet_is_used(tmp_path):
