@@ -62,13 +62,14 @@ def make_script(
     return out_path, storyboard
 
 
-def make_assets(storyboard: Storyboard, out_dir: Path, *, force: bool = False) -> dict[int, Path]:
+def make_assets(storyboard: Storyboard, out_dir: Path, *,
+                code_templates: Optional[dict] = None, force: bool = False) -> dict[int, Path]:
     """Render every Scene to out_dir/<segment_id>.png (Pillow fail-soft + caching).
 
-    Golden Rule 5 (idempotent cache): an existing non-empty PNG is reused unless
-    force=True. Golden Rule 4 (fail-soft): render_scene already degrades to the Pillow
-    slide; if even that fails for one scene, it is logged and skipped — never a whole-run
-    crash. Deterministic filenames (segment_id) keep re-runs stable for caching.
+    code_templates (the Script's code_template dict) is threaded ONLY to code scenes, so
+    the shared renderer signature stays scene/out_path. Golden Rule 5 caches existing
+    non-empty PNGs unless force=True; Golden Rule 4 fails a single scene soft (the
+    dispatcher already degrades to a Pillow slide) instead of the whole run.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     assets: dict[int, Path] = {}
@@ -77,8 +78,10 @@ def make_assets(storyboard: Storyboard, out_dir: Path, *, force: bool = False) -
         if not force and path.exists() and path.stat().st_size > 0:
             assets[scene.segment_id] = path
             continue
+        kwargs = {"code_templates": code_templates} if code_templates is not None else {}
         try:
-            assets[scene.segment_id] = render_scene(scene, path)
+            assets[scene.segment_id] = render_scene(scene, path, **kwargs)
         except Exception as exc:  # noqa: BLE001 - fail-soft per scene, never fail-whole
             log.warning("asset for scene %s failed; skipping: %s", scene.segment_id, exc)
     return assets
+
