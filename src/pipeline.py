@@ -24,7 +24,11 @@ from input_gateway import normalize_topic
 from research_agent import build_fact_sheet
 from script_engine import generate_script
 from storyboard_generator import plan
-from models import Storyboard
+from assembler import assemble
+from tts_pipeline import synthesize
+from models import Script, Storyboard
+
+
 
 log = logging.getLogger(__name__)
 
@@ -84,4 +88,56 @@ def make_assets(storyboard: Storyboard, out_dir: Path, *,
         except Exception as exc:  # noqa: BLE001 - fail-soft per scene, never fail-whole
             log.warning("asset for scene %s failed; skipping: %s", scene.segment_id, exc)
     return assets
+
+
+def make_video(
+        topic: str,
+        out_dir: Path,
+        *,
+        video_name: str = "video",
+        script_provider: Optional[Any] = None,
+        fact_sheet: Optional[Union[dict, Callable[[str], dict]]] = None,
+        disambiguate: Optional[Callable[[str], Optional[dict]]] = None,
+        research_timeout_s: float = 8.0,
+        tts: Optional[Callable[..., bytes]] = None,
+        encoder: Optional[Callable[..., Path]] = None,
+        force: bool = False,
+) -> Path:
+    """Run the full Topic -> MP4 pipeline; all LLM/tts/encoder seams are injectable.
+
+    Chains Input Gateway -> Research -> Script -> Storyboard -> Assets -> TTS -> Assembly.
+    Idempotent (Golden Rule 5): the validated script.json, per-scene PNGs, and per-segment
+    WAVs are cached under out_dir and REUSED on re-run unless force=True — so a re-run does
+    NOT call the LLM provider or tts again. Fails fast and legibly if a required driver
+    seam (tts/encoder) is missing — nothing is produced silently.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    script_path = out_dir / f"{video_name}.script.json"
+
+    script = None
+    if not force and script_path.exists():
+        try:
+            script = Script.model_validate_json(script_path.read_text())  # resume artifact
+        except Exception:  # noqa: BLE001 - corrupt/cached artifact -> regenerate
+            script = None
+    if script is None:
+        resolved = normalize_topic(topic, provider=disambiguate)
+        canonical = resolved["canonical"]
+        if isinstance(fact_sheet, dict):
+            facts = fact_sheet
+        elif callable(fact_sheet):
+            facts = fact_sheet(canonical)
+        else:
+            facts = build_fact_sheet(canonical, timeout_s=research_timeout_s)
+        script = generate_script(canonical, facts, provider=script_provider)
+        script_path.write_text(script.model_dump_json(indent=2))
+
+    storyboard = plan(script)
+    scene_assets = make_assets(
+        storyboard, out_dir / "scenes",
+        code_templates=script.code_template, force=force,
+                    )
+    audio = synthesize(script, out_dir / "audio", tts=tts, force=force)
+    return assemble(storyboard, scene_assets, audio,
+                    out_dir / f"{video_name}.mp4", encoder=encoder)
 
