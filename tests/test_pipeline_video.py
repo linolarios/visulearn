@@ -6,7 +6,6 @@ Pillow renderers run, so PNGs are genuinely produced; no network, no MoviePy/ffm
 """
 import io
 import wave
-import tts_pipeline
 from pathlib import Path
 
 import pytest
@@ -23,7 +22,7 @@ class _FakeScriptProvider:
         self.outputs = list(outputs)
         self.calls = 0
 
-    def adapt_schema(self, schema):      # neutral stub (generate_script calls it)
+    def adapt_schema(self, schema):
         return schema
 
     def complete(self, messages, schema):
@@ -65,45 +64,62 @@ class _Recorder:
 
 
 def test_make_video_end_to_end(tmp_path):
+    out = tmp_path / "rbt.mp4"
     provider = _FakeScriptProvider([VALID])
     enc = _Recorder()
 
-    path = pipeline.make_video(
-        "Red-Black Tree", tmp_path, video_name="rbt",
-        script_provider=provider,
-        tts=lambda text, **kw: _wav_bytes(),
-        encoder=enc,
-    )
+    path = pipeline.make_video("Red-Black Tree", out, script_provider=provider,
+                               tts=lambda text, **kw: _wav_bytes(), encoder=enc)
 
     n = len(Script.model_validate_json(VALID).segments)
-    assert path == tmp_path / "rbt.mp4" and path.exists()          # MP4 produced
-    assert (tmp_path / "rbt.script.json").exists()                 # script artifact
-    assert provider.calls == 1                                     # one script generation
-    assert enc.plan is not None and len(enc.plan) == n             # every segment -> a clip
-    assert all(c.duration_seconds > 0 for c in enc.plan)           # audio-driven durations
-    assert len(list((tmp_path / "scenes").glob("*.png"))) == n     # per-scene PNGs
-    assert len(list((tmp_path / "audio").glob("*.wav"))) == n      # per-segment WAVs
+    ws = tmp_path / ".rbt_workspace"
+    assert path == out and out.exists()
+    assert (ws / "script.json").exists()
+    assert provider.calls == 1
+    assert enc.plan is not None and len(enc.plan) == n
+    assert all(c.duration_seconds > 0 for c in enc.plan)
+    assert len(list((ws / "scenes").glob("*.png"))) == n
+    assert len(list((ws / "audio").glob("*.wav"))) == n
 
 
 def test_make_video_reuse_is_idempotent(tmp_path):
-    # ONE provider output: a re-run must NOT re-call the LLM — the script.json artifact is
-    # resumed (Golden Rule 5), and scene/audio dirs are cached too.
     provider = _FakeScriptProvider([VALID])
     tts, calls = _counting_tts()
     n = len(Script.model_validate_json(VALID).segments)
+    out = tmp_path / "rbt.mp4"
 
-    pipeline.make_video("Red-Black Tree", tmp_path, video_name="rbt",
-                        script_provider=provider, tts=tts, encoder=_Recorder())
+    pipeline.make_video("Red-Black Tree", out, script_provider=provider,
+                        tts=tts, encoder=_Recorder())
     assert provider.calls == 1
     assert calls[0] == n
 
-    pipeline.make_video("Red-Black Tree", tmp_path, video_name="rbt",
-                        script_provider=provider, tts=tts, encoder=_Recorder())
-    assert provider.calls == 1       # script resumed from cache — LLM NOT re-called
-    assert calls[0] == n             # audio reused too
+    pipeline.make_video("Red-Black Tree", out, script_provider=provider,
+                        tts=tts, encoder=_Recorder())
+    assert provider.calls == 1               # script resumed from cache
+    assert calls[0] == n                     # audio reused
+
+
+def test_make_video_dry_run_does_not_call_tts_or_encoder(tmp_path):
+    provider = _FakeScriptProvider([VALID])
+    tts_called = False
+
+    def tts(text, **kw):
+        nonlocal tts_called
+        tts_called = True
+
+    path = pipeline.make_video("Red-Black Tree", tmp_path / "rbt.mp4",
+                               script_provider=provider, tts=tts,
+                               encoder=_Recorder(), dry_run=True)
+
+    assert provider.calls == 1        # resolve + script generated
+    assert not tts_called             # tts NOT called — dry_run
+    assert not path.exists()          # nothing written
+    assert not (tmp_path / ".rbt_workspace" / "script.json").exists()
 
 
 def test_make_video_missing_tts_fails_fast(tmp_path, monkeypatch):
+    import tts_pipeline
+
     def boom():
         raise RuntimeError("Kokoro not installed — 'pip install kokoro-onnx' ...")
 
@@ -111,11 +127,9 @@ def test_make_video_missing_tts_fails_fast(tmp_path, monkeypatch):
     provider = _FakeScriptProvider([VALID])
 
     with pytest.raises(RuntimeError, match="Kokoro not installed"):
-        pipeline.make_video(
-            "Red-Black Tree", tmp_path, video_name="rbt",
-            script_provider=provider, tts=None, encoder=_Recorder(),
-        )
-
+        pipeline.make_video("Red-Black Tree", tmp_path / "rbt.mp4",
+                            script_provider=provider, tts=None,
+                            encoder=_Recorder())
 
 
 def test_make_video_injected_fact_sheet_is_used(tmp_path):
@@ -126,8 +140,9 @@ def test_make_video_injected_fact_sheet_is_used(tmp_path):
         seen["topic"] = topic
         return {"definition": "ok"}
 
-    pipeline.make_video("red-black tree", tmp_path, video_name="rbt",
+    pipeline.make_video("red-black tree", tmp_path / "rbt.mp4",
                         script_provider=provider, fact_sheet=facts,
-                        tts=lambda text, **kw: _wav_bytes(), encoder=_Recorder())
+                        tts=lambda text, **kw: _wav_bytes(),
+                        encoder=_Recorder())
 
     assert seen["topic"] == "Red-Black Tree"

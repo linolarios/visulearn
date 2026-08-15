@@ -92,9 +92,9 @@ def make_assets(storyboard: Storyboard, out_dir: Path, *,
 
 def make_video(
         topic: str,
-        out_dir: Path,
+        out_path: Path,
         *,
-        video_name: str = "video",
+        workspace_dir: Optional[Path] = None,
         script_provider: Optional[Any] = None,
         fact_sheet: Optional[Union[dict, Callable[[str], dict]]] = None,
         disambiguate: Optional[Callable[[str], Optional[dict]]] = None,
@@ -102,24 +102,29 @@ def make_video(
         tts: Optional[Callable[..., bytes]] = None,
         encoder: Optional[Callable[..., Path]] = None,
         force: bool = False,
+        dry_run: bool = False,
 ) -> Path:
     """Run the full Topic -> MP4 pipeline; all LLM/tts/encoder seams are injectable.
 
-    Chains Input Gateway -> Research -> Script -> Storyboard -> Assets -> TTS -> Assembly.
-    Idempotent (Golden Rule 5): the validated script.json, per-scene PNGs, and per-segment
-    WAVs are cached under out_dir and REUSED on re-run unless force=True — so a re-run does
-    NOT call the LLM provider or tts again. Fails fast and legibly if a required driver
-    seam (tts/encoder) is missing — nothing is produced silently.
+    ``out_path`` is the output MP4 path. A private workspace (``<workspace_dir>/``) holds
+    the script.json, per-scene PNGs, and per-segment WAVs for idempotent caching (GR5).
+
+    When *dry_run=True*, only the topic-resolution and fact-grounding steps run (they are
+    cheap, pure-ish lookups); no artifact is written and tts/encoder are not called.
+    Returns out_path without creating it.
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    script_path = out_dir / f"{video_name}.script.json"
+    ws = workspace_dir or out_path.parent / f".{out_path.stem}_workspace"
+    script_path = ws / "script.json"
+    scenes_dir = ws / "scenes"
+    audio_dir = ws / "audio"
 
     script = None
     if not force and script_path.exists():
         try:
-            script = Script.model_validate_json(script_path.read_text())  # resume artifact
-        except Exception:  # noqa: BLE001 - corrupt/cached artifact -> regenerate
+            script = Script.model_validate_json(script_path.read_text())
+        except Exception:  # noqa: BLE001 - corrupt cache -> regenerate
             script = None
+
     if script is None:
         resolved = normalize_topic(topic, provider=disambiguate)
         canonical = resolved["canonical"]
@@ -130,14 +135,18 @@ def make_video(
         else:
             facts = build_fact_sheet(canonical, timeout_s=research_timeout_s)
         script = generate_script(canonical, facts, provider=script_provider)
-        script_path.write_text(script.model_dump_json(indent=2))
+        if not dry_run:
+            ws.mkdir(parents=True, exist_ok=True)
+            script_path.write_text(script.model_dump_json(indent=2))
+
+    if dry_run:
+        print(f"[dry-run] {topic!r} -> canonical='{script.meta.topic}' "
+              f"({len(script.segments)} segments)")
+        return out_path
 
     storyboard = plan(script)
-    scene_assets = make_assets(
-        storyboard, out_dir / "scenes",
-        code_templates=script.code_template, force=force,
-                    )
-    audio = synthesize(script, out_dir / "audio", tts=tts, force=force)
-    return assemble(storyboard, scene_assets, audio,
-                    out_dir / f"{video_name}.mp4", encoder=encoder)
+    scene_assets = make_assets(storyboard, scenes_dir,
+                               code_templates=script.code_template, force=force)
+    audio = synthesize(script, audio_dir, tts=tts, force=force)
+    return assemble(storyboard, scene_assets, audio, out_path, encoder=encoder)
 
